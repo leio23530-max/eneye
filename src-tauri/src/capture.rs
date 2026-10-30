@@ -573,6 +573,13 @@ fn handle_selection(
     start: (i32, i32),
     end: (i32, i32),
 ) {
+    // Region drags in a screenshot overlay are not text selections. Running the
+    // clipboard fallback there cancels the capture and restores the previous
+    // clipboard image a moment later, which looks like "paste is one image
+    // behind" in every app.
+    if is_screenshot_overlay_at(start) || is_screenshot_overlay_at(end) {
+        return;
+    }
     if let Some(text) = uia_selection(automation, start) {
         show_translation_for_text(app, text, "uia", end);
     } else if let Some(text) = copy_selection_text() {
@@ -691,14 +698,112 @@ fn copy_selection_text() -> Option<String> {
     use uiautomation::{clipboards::Clipboard, inputs::Keyboard};
 
     let snapshot = Clipboard::open().ok()?.snapshot(true).ok()?;
+    let sequence_before = clipboard_sequence();
     let keyboard = Keyboard::new();
     keyboard.send_keys("{ctrl}c").ok()?;
     thread::sleep(Duration::from_millis(70));
-    let text = Clipboard::open().ok()?.get_text().ok();
-    if let Ok(clipboard) = Clipboard::open() {
+    let text = Clipboard::open()
+        .ok()
+        .and_then(|clipboard| clipboard.get_text().ok());
+    let sequence_after = clipboard_sequence();
+    if should_restore_clipboard(
+        sequence_before,
+        sequence_after,
+        clipboard_sequence(),
+        text.as_deref(),
+    ) && let Ok(clipboard) = Clipboard::open()
+    {
         let _ = clipboard.restore(snapshot);
     }
     text.filter(|text| !text.trim().is_empty())
+}
+
+/// Restore the user's original clipboard only while it still contains the text
+/// our synthetic Ctrl+C just copied. If another program (for example the
+/// screenshot tool) wrote to the clipboard meanwhile, that newer content wins.
+fn should_restore_clipboard(
+    sequence_before: u32,
+    sequence_after: u32,
+    sequence_now: u32,
+    text: Option<&str>,
+) -> bool {
+    text.is_some_and(|text| !text.trim().is_empty())
+        && sequence_after != sequence_before
+        && sequence_now == sequence_after
+}
+
+fn is_screenshot_process(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(
+        name,
+        "screenclippinghost"
+            | "snippingtool"
+            | "screensketch"
+            | "snipaste"
+            | "pixpin"
+            | "sharex"
+            | "greenshot"
+            | "picpick"
+    )
+}
+
+#[cfg(windows)]
+fn is_screenshot_overlay_at(point: (i32, i32)) -> bool {
+    process_name_at(point).is_some_and(|name| is_screenshot_process(&name))
+}
+
+#[cfg(windows)]
+fn process_name_at(point: (i32, i32)) -> Option<String> {
+    use windows::{
+        Win32::{
+            Foundation::{CloseHandle, POINT},
+            System::Threading::{
+                OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW,
+            },
+            UI::WindowsAndMessaging::{GetWindowThreadProcessId, WindowFromPoint},
+        },
+        core::PWSTR,
+    };
+
+    let hwnd = unsafe {
+        WindowFromPoint(POINT {
+            x: point.0,
+            y: point.1,
+        })
+    };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut process_id = 0_u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    }
+    if process_id == 0 {
+        return None;
+    }
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
+    let mut buffer = [0_u16; 1024];
+    let mut length = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    result.ok()?;
+    let path = String::from_utf16_lossy(&buffer[..length as usize]);
+    Some(path.rsplit(['\\', '/']).next()?.to_ascii_lowercase())
+}
+
+#[cfg(windows)]
+fn clipboard_sequence() -> u32 {
+    unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() }
 }
 
 #[cfg(not(windows))]
@@ -981,6 +1086,24 @@ mod tests {
         ));
         assert!(!is_usable_selection("hello"));
         assert!(!is_usable_selection("1234"));
+    }
+
+    #[test]
+    fn skips_drag_selection_inside_screenshot_tools() {
+        assert!(is_screenshot_process("ScreenClippingHost.exe"));
+        assert!(is_screenshot_process("SnippingTool"));
+        assert!(is_screenshot_process("PixPin.exe"));
+        assert!(!is_screenshot_process("notepad.exe"));
+        assert!(!is_screenshot_process("Weixin.exe"));
+    }
+
+    #[test]
+    fn only_restores_the_clipboard_while_ctrl_c_still_owns_it() {
+        assert!(should_restore_clipboard(10, 11, 11, Some("selected text")));
+        assert!(!should_restore_clipboard(10, 11, 12, Some("selected text")));
+        assert!(!should_restore_clipboard(10, 11, 11, Some("   ")));
+        assert!(!should_restore_clipboard(10, 11, 11, None));
+        assert!(!should_restore_clipboard(10, 10, 10, Some("old clipboard")));
     }
 
     #[test]
