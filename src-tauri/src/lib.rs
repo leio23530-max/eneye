@@ -38,6 +38,7 @@ struct AppState {
     last_word_probe: Mutex<word_probe::WordProbeReport>,
     overlay_mode: Mutex<capture::OverlayMode>,
     overlay_anchor: Mutex<Option<(i32, i32)>>,
+    overlay_card_bounds: Mutex<Option<capture::OverlayBounds>>,
 }
 
 impl AppState {
@@ -65,6 +66,7 @@ impl AppState {
             last_word_probe: Mutex::new(word_probe::WordProbeReport::default()),
             overlay_mode: Mutex::new(capture::OverlayMode::Hidden),
             overlay_anchor: Mutex::new(None),
+            overlay_card_bounds: Mutex::new(None),
         })
     }
 }
@@ -506,6 +508,13 @@ fn set_overlay_pinned(pinned: bool, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
+fn set_overlay_card_bounds(bounds: Option<capture::OverlayBounds>, state: State<'_, AppState>) {
+    if let Ok(mut current) = state.overlay_card_bounds.lock() {
+        *current = bounds;
+    }
+}
+
+#[tauri::command]
 fn hide_overlay(app: tauri::AppHandle, state: State<'_, AppState>) {
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.hide();
@@ -713,6 +722,7 @@ pub fn run() {
             translate_selection,
             cancel_translation,
             set_overlay_pinned,
+            set_overlay_card_bounds,
             hide_overlay,
             show_settings
         ])

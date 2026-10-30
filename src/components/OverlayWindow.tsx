@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelTranslation,
@@ -30,6 +31,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
   const [translation, setTranslation] = useState<TranslationState | null>(null);
   const [pinned, setPinned] = useState(false);
   const currentRequest = useRef("");
+  const stageRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -102,6 +104,54 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     void invoke("set_overlay_pinned", { pinned: false });
   }, [lookup?.normalizedWord, preview]);
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let observer: ResizeObserver | undefined;
+    let unlistenMoved: (() => void) | undefined;
+    const selector = ".dictionary-card, .translation-card";
+
+    async function publishBounds() {
+      if (disposed) return;
+      const card = stageRef.current?.querySelector<HTMLElement>(selector);
+      if (!card) {
+        await invoke("set_overlay_card_bounds", { bounds: null });
+        return;
+      }
+      const rect = card.getBoundingClientRect();
+      const position = await getCurrentWindow().outerPosition();
+      if (disposed) return;
+      const scale = window.devicePixelRatio || 1;
+      await invoke("set_overlay_card_bounds", {
+        bounds: {
+          x: Math.round(position.x + rect.left * scale),
+          y: Math.round(position.y + rect.top * scale),
+          width: Math.max(1, Math.round(rect.width * scale)),
+          height: Math.max(1, Math.round(rect.height * scale)),
+        },
+      });
+    }
+
+    void publishBounds();
+    const card = stageRef.current?.querySelector<HTMLElement>(selector);
+    if (card) {
+      observer = new ResizeObserver(() => void publishBounds());
+      observer.observe(card);
+    }
+    getCurrentWindow()
+      .onMoved(() => void publishBounds())
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else unlistenMoved = unlisten;
+      });
+    return () => {
+      disposed = true;
+      observer?.disconnect();
+      unlistenMoved?.();
+      void invoke("set_overlay_card_bounds", { bounds: null });
+    };
+  }, [lookup?.normalizedWord, translation?.requestId]);
+
   async function hide() {
     await invoke("hide_overlay");
   }
@@ -139,7 +189,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
 
   if (lookup) {
     return (
-      <main className="overlay-stage">
+      <main className="overlay-stage" ref={stageRef}>
         <OverlayCard
           key={lookup.normalizedWord}
           onClose={() => void hide()}
@@ -153,7 +203,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
 
   if (translation) {
     return (
-      <main className="overlay-stage">
+      <main className="overlay-stage" ref={stageRef}>
         <TranslationOverlayCard
           onCancel={() => void cancelTranslation(translation.requestId)}
           onClose={() => void hide()}
@@ -165,7 +215,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     );
   }
 
-  return <main className="overlay-stage" />;
+  return <main className="overlay-stage" ref={stageRef} />;
 }
 
 export function TranslationOverlayCard({

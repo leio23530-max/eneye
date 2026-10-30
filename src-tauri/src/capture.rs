@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
 use crate::word_probe::{self, WordProbeReport};
@@ -28,6 +28,15 @@ pub enum OverlayMode {
     Hidden,
     Word,
     Translation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -238,7 +247,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
 
             if down_at.is_some()
                 || point_inside_own_process(pointer)
-                || (overlay_is_visible(&app) && point_inside_overlay(&app, pointer))
+                || (overlay_is_visible(&app) && point_inside_card(&app, pointer))
                 || overlay_mode(&app) == OverlayMode::Translation
                 || (overlay_pinned(&app) && overlay_is_visible(&app))
             {
@@ -543,6 +552,20 @@ fn overlay_is_visible(app: &tauri::AppHandle) -> bool {
     app.get_webview_window("overlay")
         .and_then(|window| window.is_visible().ok())
         .unwrap_or(false)
+}
+
+fn point_inside_card(app: &tauri::AppHandle, point: (i32, i32)) -> bool {
+    let bounds = app
+        .state::<AppState>()
+        .overlay_card_bounds
+        .lock()
+        .ok()
+        .and_then(|bounds| *bounds);
+    if let Some(bounds) = bounds {
+        point_in_window_bounds((bounds.x, bounds.y), (bounds.width, bounds.height), point)
+    } else {
+        point_inside_overlay(app, point)
+    }
 }
 
 fn point_inside_overlay(app: &tauri::AppHandle, point: (i32, i32)) -> bool {
