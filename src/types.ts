@@ -1,4 +1,5 @@
-export type RecognitionSource = "uia" | "clipboard" | "ocr";
+export type RecognitionSource =
+  "uia" | "msaa" | "win32" | "clipboard" | "ocr" | "search";
 
 export interface DictionaryEntry {
   dictionaryId: string;

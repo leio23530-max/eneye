@@ -171,6 +171,16 @@ fn lookup_word(
 }
 
 #[tauri::command]
+fn search_dictionary(query: String, state: State<'_, AppState>) -> Result<LookupResult, String> {
+    state
+        .dictionary
+        .lock()
+        .map_err(|_| "dictionary lock is poisoned".to_owned())?
+        .search(&query)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_history(
     query: Option<String>,
     limit: Option<u32>,
@@ -680,6 +690,7 @@ pub fn run() {
             detect_agent_connections,
             save_settings,
             lookup_word,
+            search_dictionary,
             get_history,
             delete_history,
             clear_history,

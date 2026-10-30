@@ -233,6 +233,18 @@ export async function lookupWord(
   return invoke<LookupResult>("lookup_word", { word, source });
 }
 
+export async function searchDictionary(query: string): Promise<LookupResult> {
+  if (!isTauriRuntime()) {
+    return {
+      ...SAMPLE_LOOKUP,
+      word: query.trim(),
+      normalizedWord: query.trim().toLowerCase(),
+      source: "search",
+    };
+  }
+  return invoke<LookupResult>("search_dictionary", { query });
+}
+
 export async function getHistory(
   query?: string,
   limit = 100,

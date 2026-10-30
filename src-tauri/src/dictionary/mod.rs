@@ -95,6 +95,31 @@ impl DictionaryManager {
         })
     }
 
+    /// Looks up a word or phrase in every external dictionary, plus ECDICT
+    /// when the query is a normal English headword. Unlike the hover path this
+    /// intentionally accepts CJK queries so reverse dictionaries can be used.
+    pub fn search(&self, raw_query: &str) -> Result<LookupResult> {
+        let query = clean_search_query(raw_query)?;
+        let normalized_word = normalize_word(&query);
+        let mut entries = Vec::new();
+        for dictionary in &self.external {
+            entries.extend(dictionary.lookup(&query));
+        }
+        if let Ok(word) = clean_lookup_word(&query)
+            && let Some(dictionary) = &self.ecdic
+        {
+            entries.extend(dictionary.lookup(&word, &normalized_word)?);
+        }
+        entries.sort_by_key(|entry| entry.priority);
+        entries.truncate(24);
+        Ok(LookupResult {
+            word: query,
+            normalized_word,
+            source: "search".into(),
+            entries,
+        })
+    }
+
     pub fn list_external(&self) -> Vec<ExternalDictionary> {
         self.external
             .iter()
@@ -179,6 +204,20 @@ impl DictionaryManager {
         fs::rename(temporary, &self.registry_path)?;
         Ok(())
     }
+}
+
+pub fn clean_search_query(raw: &str) -> Result<String> {
+    let query = raw.trim();
+    if query.is_empty() {
+        anyhow::bail!("请输入要查询的词");
+    }
+    if query.chars().count() > 128 {
+        anyhow::bail!("查询内容过长");
+    }
+    if query.chars().any(char::is_control) {
+        anyhow::bail!("查询内容不能包含换行或控制字符");
+    }
+    Ok(query.to_owned())
 }
 
 pub fn clean_lookup_word(raw: &str) -> Result<String> {
@@ -346,6 +385,37 @@ mod tests {
     fn splits_translation_lines_before_english_fallback() {
         let result = split_definitions("第一行\n第二行", "english");
         assert_eq!(result, vec!["第一行", "第二行"]);
+    }
+
+    #[test]
+    fn accepts_cjk_search_queries() {
+        assert_eq!(clean_search_query(" 美丽 ").unwrap(), "美丽");
+        assert_eq!(clean_search_query("serendipity").unwrap(), "serendipity");
+        assert!(clean_search_query("   ").is_err());
+        assert!(clean_search_query("two\nlines").is_err());
+    }
+
+    #[test]
+    fn searches_chinese_keys_in_external_dictionaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let csv_path = directory.path().join("zh.csv");
+        std::fs::write(&csv_path, "word,translation\n美丽,beautiful\n爱,love\n").unwrap();
+        let registry_path = directory.path().join("dictionaries.json");
+        let metadata = ExternalDictionary {
+            id: "zh".into(),
+            name: "中文反查".into(),
+            path: csv_path,
+            format: "csv".into(),
+            priority: 0,
+            available: true,
+            error: None,
+        };
+        std::fs::write(&registry_path, serde_json::to_vec(&vec![metadata]).unwrap()).unwrap();
+        let manager =
+            DictionaryManager::open(directory.path().join("missing.sqlite"), registry_path);
+        let result = manager.search("美丽").unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].definitions, vec!["beautiful"]);
     }
 
     #[test]

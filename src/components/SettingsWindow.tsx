@@ -29,6 +29,7 @@ import type {
   NotebookWord,
   WordProbeReport,
 } from "../types";
+import { DictionarySearchPanel } from "./DictionarySearchPanel";
 import { Icon } from "./Icon";
 
 type Section = "general" | "dictionary" | "ai" | "history" | "diagnostics";
@@ -717,6 +718,7 @@ export function SettingsWindow({
 
         {section === "dictionary" && (
           <div className="settings-stack">
+            <DictionarySearchPanel />
             <section className="settings-section">
               <div className="section-title">
                 <div>

@@ -2081,3 +2081,98 @@ select {
   padding: 6px 18px;
   text-align: right;
 }
+
+/* Dictionary search */
+.dictionary-search-form {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.dictionary-search-form .search-field {
+  flex: 1;
+}
+
+.dictionary-search-results {
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+  max-height: 520px;
+  overflow: auto;
+  padding-top: 10px;
+}
+
+.dictionary-search-results[data-empty="true"] {
+  border-top: 0;
+}
+
+.search-summary {
+  color: var(--ink-faint);
+  font-size: 11px;
+  margin: 0 0 6px;
+}
+
+.search-entry {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 7px;
+  padding: 12px 0;
+}
+
+.search-entry:first-of-type {
+  border-top: 0;
+}
+
+.search-entry-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.search-entry-head strong {
+  color: var(--accent-strong);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.search-entry-head span {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.search-entry-definitions p {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.65;
+  margin: 3px 0;
+}
+
+.search-entry-html summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 11px;
+  list-style: none;
+}
+
+.search-entry-html summary::-webkit-details-marker {
+  display: none;
+}
+
+.search-entry-html > div {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.65;
+  margin-top: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.search-entry-html img {
+  height: auto;
+  max-width: 100%;
+}
+
+.external-dictionary > button:disabled {
+  opacity: 0.38;
+}

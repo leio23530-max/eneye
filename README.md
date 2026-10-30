@@ -11,6 +11,7 @@ Eneye 是一个 Windows 跨应用划词翻译器。它读取当前屏幕中可�
 - 支持 OpenAI Chat Completions 和 Anthropic Messages，可配置 DeepSeek、OpenAI、Anthropic 或兼容地址。
 - API Key 保存在 Windows 凭据管理器，不写入设置文件。
 - 内置完整 ECDICT；支持导入 CSV、StarDict 和 MDX/MDD，外部词典引用原文件。
+- 词典页支持中英文手动查词；中文查询会使用已安装的反查词典。
 - 本地生词本：内置生词本、好词本、坏词本，可继续新建；在悬浮卡片里一键收藏，也可搜索和移除单词。
 - 查询历史仍保留在本地（最多 10,000 条），AI 译文与查询记录不会被生词本操作删除。
 - 支持系统明暗主题、可选本机字体和减少动态效果。
