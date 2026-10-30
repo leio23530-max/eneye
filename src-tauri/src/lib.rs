@@ -15,7 +15,7 @@ use std::{
 
 use base64::Engine as _;
 use dictionary::{DictionaryManager, DictionaryStatus, ExternalDictionary};
-use models::{BootstrapData, HistoryRecord, LookupResult};
+use models::{BootstrapData, HistoryRecord, LookupResult, Notebook, NotebookWord};
 use settings::{AppSettings, SettingsStore};
 use storage::Storage;
 use tauri::{
@@ -201,6 +201,77 @@ fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
         .lock()
         .map_err(|_| "storage lock is poisoned".to_owned())?
         .clear()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_notebooks(state: State<'_, AppState>) -> Result<Vec<Notebook>, String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "storage lock is poisoned".to_owned())?
+        .list_notebooks()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_notebook(name: String, state: State<'_, AppState>) -> Result<Notebook, String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "storage lock is poisoned".to_owned())?
+        .create_notebook(&name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_notebook(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "storage lock is poisoned".to_owned())?
+        .delete_notebook(id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_notebook_words(
+    notebook_id: i64,
+    query: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<NotebookWord>, String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "storage lock is poisoned".to_owned())?
+        .list_notebook_words(notebook_id, query.as_deref(), limit.unwrap_or(200))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_word_to_notebook(
+    notebook_id: i64,
+    word: String,
+    phonetic: String,
+    definition: String,
+    state: State<'_, AppState>,
+) -> Result<NotebookWord, String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "storage lock is poisoned".to_owned())?
+        .add_word_to_notebook(notebook_id, &word, &phonetic, &definition)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_notebook_word(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "storage lock is poisoned".to_owned())?
+        .remove_notebook_word(id)
         .map_err(|error| error.to_string())
 }
 
@@ -612,6 +683,12 @@ pub fn run() {
             get_history,
             delete_history,
             clear_history,
+            list_notebooks,
+            create_notebook,
+            delete_notebook,
+            list_notebook_words,
+            add_word_to_notebook,
+            remove_notebook_word,
             get_dictionary_status,
             get_capture_diagnostics,
             list_external_dictionaries,

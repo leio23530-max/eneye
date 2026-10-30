@@ -74,8 +74,8 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn validate(&mut self) -> Result<()> {
-        self.lookup_delay_ms = self.lookup_delay_ms.clamp(150, 500);
-        self.word_card_linger_ms = self.word_card_linger_ms.clamp(500, 5000);
+        self.lookup_delay_ms = self.lookup_delay_ms.clamp(100, 500);
+        self.word_card_linger_ms = self.word_card_linger_ms.clamp(0, 5000);
         self.headword_font =
             sanitize_font_name(&self.headword_font).unwrap_or_else(|| "Georgia".into());
         self.body_font = sanitize_font_name(&self.body_font).unwrap_or_else(|| "Segoe UI".into());
@@ -279,13 +279,13 @@ mod tests {
     fn clamps_delay_and_rejects_unsafe_font_names() {
         let mut settings = AppSettings {
             lookup_delay_ms: 20,
-            word_card_linger_ms: 100,
+            word_card_linger_ms: 0,
             body_font: "Segoe UI; background:red".into(),
             ..AppSettings::default()
         };
         settings.validate().unwrap();
-        assert_eq!(settings.lookup_delay_ms, 150);
-        assert_eq!(settings.word_card_linger_ms, 500);
+        assert_eq!(settings.lookup_delay_ms, 100);
+        assert_eq!(settings.word_card_linger_ms, 0);
         assert_eq!(settings.body_font, "Segoe UI");
     }
 

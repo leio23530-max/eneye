@@ -108,6 +108,22 @@ export interface ExternalDictionary {
   error?: string;
 }
 
+export interface Notebook {
+  id: number;
+  name: string;
+  wordCount: number;
+  createdAt: string;
+}
+
+export interface NotebookWord {
+  id: number;
+  notebookId: number;
+  word: string;
+  phonetic: string;
+  definition: string;
+  createdAt: string;
+}
+
 export interface HistoryRecord {
   id: number;
   kind: "word" | "sentence";

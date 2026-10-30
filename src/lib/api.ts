@@ -8,6 +8,8 @@ import type {
   HistoryRecord,
   ExternalDictionary,
   LookupResult,
+  Notebook,
+  NotebookWord,
   TranslationEvent,
   TranslationRequest,
   WordProbeReport,
@@ -65,6 +67,162 @@ export async function saveSettings(
 ): Promise<AppSettings> {
   if (!isTauriRuntime()) return settings;
   return invoke<AppSettings>("save_settings", { settings });
+}
+
+let previewNotebooks: Notebook[] = [
+  {
+    id: 1,
+    name: "生词本",
+    wordCount: 0,
+    createdAt: "2026-01-01T00:00:00Z",
+  },
+  {
+    id: 2,
+    name: "好词本",
+    wordCount: 0,
+    createdAt: "2026-01-01T00:00:00Z",
+  },
+  {
+    id: 3,
+    name: "坏词本",
+    wordCount: 0,
+    createdAt: "2026-01-01T00:00:00Z",
+  },
+];
+let previewNotebookWords: NotebookWord[] = [];
+let previewNotebookId = 4;
+let previewNotebookWordId = 1;
+
+export function resetPreviewNotebooks() {
+  previewNotebooks = [
+    { id: 1, name: "生词本", wordCount: 0, createdAt: "2026-01-01T00:00:00Z" },
+    { id: 2, name: "好词本", wordCount: 0, createdAt: "2026-01-01T00:00:00Z" },
+    { id: 3, name: "坏词本", wordCount: 0, createdAt: "2026-01-01T00:00:00Z" },
+  ];
+  previewNotebookWords = [];
+  previewNotebookId = 4;
+  previewNotebookWordId = 1;
+}
+
+function previewNotebookCount(id: number) {
+  return previewNotebookWords.filter((word) => word.notebookId === id).length;
+}
+
+export async function listNotebooks(): Promise<Notebook[]> {
+  if (!isTauriRuntime()) {
+    return previewNotebooks.map((notebook) => ({
+      ...notebook,
+      wordCount: previewNotebookCount(notebook.id),
+    }));
+  }
+  return invoke<Notebook[]>("list_notebooks");
+}
+
+export async function createNotebook(name: string): Promise<Notebook> {
+  if (!isTauriRuntime()) {
+    const clean = name.trim();
+    if (!clean) throw new Error("本子名称不能为空");
+    if (
+      previewNotebooks.some(
+        (notebook) => notebook.name.toLowerCase() === clean.toLowerCase(),
+      )
+    ) {
+      throw new Error("已有同名的本子");
+    }
+    const notebook: Notebook = {
+      id: previewNotebookId++,
+      name: clean,
+      wordCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+    previewNotebooks.push(notebook);
+    return notebook;
+  }
+  return invoke<Notebook>("create_notebook", { name });
+}
+
+export async function deleteNotebook(id: number): Promise<void> {
+  if (!isTauriRuntime()) {
+    previewNotebooks = previewNotebooks.filter(
+      (notebook) => notebook.id !== id,
+    );
+    previewNotebookWords = previewNotebookWords.filter(
+      (word) => word.notebookId !== id,
+    );
+    return;
+  }
+  await invoke("delete_notebook", { id });
+}
+
+export async function listNotebookWords(
+  notebookId: number,
+  query?: string,
+): Promise<NotebookWord[]> {
+  if (!isTauriRuntime()) {
+    const needle = query?.trim().toLowerCase();
+    return previewNotebookWords
+      .filter((word) => word.notebookId === notebookId)
+      .filter(
+        (word) =>
+          !needle ||
+          word.word.toLowerCase().includes(needle) ||
+          word.definition.toLowerCase().includes(needle),
+      )
+      .slice()
+      .reverse();
+  }
+  return invoke<NotebookWord[]>("list_notebook_words", {
+    notebookId,
+    query: query?.trim() || null,
+    limit: 200,
+  });
+}
+
+export async function addWordToNotebook(
+  notebookId: number,
+  word: string,
+  phonetic: string,
+  definition: string,
+): Promise<NotebookWord> {
+  if (!isTauriRuntime()) {
+    const clean = word.trim();
+    const existing = previewNotebookWords.find(
+      (item) =>
+        item.notebookId === notebookId &&
+        item.word.toLowerCase() === clean.toLowerCase(),
+    );
+    if (existing) {
+      existing.phonetic = phonetic;
+      existing.definition = definition;
+      return { ...existing };
+    }
+    const entry: NotebookWord = {
+      id: previewNotebookWordId++,
+      notebookId,
+      word: clean,
+      phonetic,
+      definition,
+      createdAt: new Date().toISOString(),
+    };
+    previewNotebookWords.push(entry);
+    return { ...entry };
+  }
+  return invoke<NotebookWord>("add_word_to_notebook", {
+    notebookId,
+    word,
+    phonetic,
+    definition,
+  });
+}
+
+export async function removeNotebookWord(id: number): Promise<void> {
+  if (!isTauriRuntime()) {
+    previewNotebookWords = previewNotebookWords.filter(
+      (word) => word.id !== id,
+    );
+    return;
+  }
+  await invoke("remove_notebook_word", { id });
 }
 
 export async function lookupWord(

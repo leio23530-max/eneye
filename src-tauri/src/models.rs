@@ -27,6 +27,26 @@ pub struct LookupResult {
     pub entries: Vec<DictionaryEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Notebook {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+    pub word_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookWord {
+    pub id: i64,
+    pub notebook_id: i64,
+    pub word: String,
+    pub phonetic: String,
+    pub definition: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRecord {

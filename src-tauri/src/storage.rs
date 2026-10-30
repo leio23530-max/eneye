@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::models::{HistoryRecord, LookupResult};
+use crate::dictionary::normalize_word;
+use crate::models::{HistoryRecord, LookupResult, Notebook, NotebookWord};
 
 const HISTORY_LIMIT: i64 = 10_000;
 const DEDUPE_WINDOW_SECONDS: i64 = 60;
@@ -29,6 +30,7 @@ impl Storage {
             r#"
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
+            PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL CHECK (kind IN ('word', 'sentence')),
@@ -43,9 +45,165 @@ impl Storage {
                 ON history(created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS history_normalized
                 ON history(normalized);
+            CREATE TABLE IF NOT EXISTS notebooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notebook_words (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                word TEXT NOT NULL,
+                normalized TEXT NOT NULL,
+                phonetic TEXT NOT NULL DEFAULT '',
+                definition TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(notebook_id, normalized)
+            );
+            CREATE INDEX IF NOT EXISTS notebook_words_notebook
+                ON notebook_words(notebook_id, id DESC);
             "#,
         )?;
+        ensure_default_notebooks(&connection)?;
         Ok(Self { connection })
+    }
+
+    pub fn list_notebooks(&self) -> Result<Vec<Notebook>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT n.id, n.name, n.created_at, COUNT(w.id)
+            FROM notebooks n
+            LEFT JOIN notebook_words w ON w.notebook_id = n.id
+            GROUP BY n.id
+            ORDER BY n.id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], notebook_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn create_notebook(&self, name: &str) -> Result<Notebook> {
+        let name = clean_notebook_name(name)?;
+        self.connection
+            .execute(
+                "INSERT INTO notebooks (name, created_at) VALUES (?1, ?2)",
+                params![name, now()],
+            )
+            .map_err(|error| {
+                if error.to_string().contains("UNIQUE") {
+                    anyhow::anyhow!("已有同名的本子")
+                } else {
+                    error.into()
+                }
+            })?;
+        self.notebook(self.connection.last_insert_rowid())
+    }
+
+    pub fn delete_notebook(&self, id: i64) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM notebooks WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn list_notebook_words(
+        &self,
+        notebook_id: i64,
+        query: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<NotebookWord>> {
+        let limit = limit.clamp(1, 500) as i64;
+        let query = query.unwrap_or_default().trim();
+        let mut statement = if query.is_empty() {
+            self.connection.prepare(
+                r#"
+                SELECT id, notebook_id, word, phonetic, definition, created_at
+                FROM notebook_words
+                WHERE notebook_id = ?1
+                ORDER BY id DESC LIMIT ?2
+                "#,
+            )?
+        } else {
+            self.connection.prepare(
+                r#"
+                SELECT id, notebook_id, word, phonetic, definition, created_at
+                FROM notebook_words
+                WHERE notebook_id = ?1
+                  AND (word LIKE '%' || ?2 || '%' OR definition LIKE '%' || ?2 || '%')
+                ORDER BY id DESC LIMIT ?3
+                "#,
+            )?
+        };
+        let rows: Vec<rusqlite::Result<NotebookWord>> = if query.is_empty() {
+            statement
+                .query_map(params![notebook_id, limit], notebook_word_from_row)?
+                .collect()
+        } else {
+            statement
+                .query_map(params![notebook_id, query, limit], notebook_word_from_row)?
+                .collect()
+        };
+        Ok(rows.into_iter().collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn add_word_to_notebook(
+        &self,
+        notebook_id: i64,
+        word: &str,
+        phonetic: &str,
+        definition: &str,
+    ) -> Result<NotebookWord> {
+        let word = word.trim();
+        let normalized = normalize_word(word);
+        if word.is_empty() || normalized.is_empty() || word.chars().count() > 96 {
+            anyhow::bail!("不是可收藏的单词");
+        }
+        let phonetic = phonetic.trim().chars().take(120).collect::<String>();
+        let definition = definition.trim().chars().take(2_000).collect::<String>();
+        self.connection.execute(
+            r#"
+            INSERT INTO notebook_words (
+                notebook_id, word, normalized, phonetic, definition, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(notebook_id, normalized) DO UPDATE SET
+                word = excluded.word,
+                phonetic = excluded.phonetic,
+                definition = excluded.definition
+            "#,
+            params![notebook_id, word, normalized, phonetic, definition, now()],
+        )?;
+        self.connection
+            .query_row(
+                r#"
+                SELECT id, notebook_id, word, phonetic, definition, created_at
+                FROM notebook_words
+                WHERE notebook_id = ?1 AND normalized = ?2
+                "#,
+                params![notebook_id, normalized],
+                notebook_word_from_row,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn remove_notebook_word(&self, id: i64) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM notebook_words WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    fn notebook(&self, id: i64) -> Result<Notebook> {
+        self.connection
+            .query_row(
+                r#"
+                SELECT n.id, n.name, n.created_at, COUNT(w.id)
+                FROM notebooks n
+                LEFT JOIN notebook_words w ON w.notebook_id = n.id
+                WHERE n.id = ?1
+                GROUP BY n.id
+                "#,
+                params![id],
+                notebook_from_row,
+            )
+            .map_err(Into::into)
     }
 
     pub fn record_lookup(&self, lookup: &LookupResult) -> Result<()> {
@@ -199,6 +357,60 @@ impl Storage {
     }
 }
 
+fn now() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn clean_notebook_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("本子名称不能为空");
+    }
+    if name.chars().count() > 24 {
+        anyhow::bail!("本子名称最多 24 个字符");
+    }
+    if name.chars().any(char::is_control) {
+        anyhow::bail!("本子名称不能包含换行或控制字符");
+    }
+    Ok(name.to_owned())
+}
+
+fn ensure_default_notebooks(connection: &Connection) -> Result<()> {
+    let count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM notebooks", [], |row| row.get(0))?;
+    if count > 0 {
+        return Ok(());
+    }
+    let created_at = now();
+    for name in ["生词本", "好词本", "坏词本"] {
+        connection.execute(
+            "INSERT INTO notebooks (name, created_at) VALUES (?1, ?2)",
+            params![name, created_at],
+        )?;
+    }
+    Ok(())
+}
+
+fn notebook_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Notebook> {
+    Ok(Notebook {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        word_count: row.get(3)?,
+    })
+}
+
+fn notebook_word_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotebookWord> {
+    Ok(NotebookWord {
+        id: row.get(0)?,
+        notebook_id: row.get(1)?,
+        word: row.get(2)?,
+        phonetic: row.get(3)?,
+        definition: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +469,69 @@ mod tests {
         assert_eq!(storage.list(None, 20).unwrap().len(), 1);
         storage.clear().unwrap();
         assert!(storage.list(None, 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn starts_with_default_notebooks() {
+        let storage = storage();
+        let names = storage
+            .list_notebooks()
+            .unwrap()
+            .into_iter()
+            .map(|notebook| notebook.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["生词本", "好词本", "坏词本"]);
+    }
+
+    #[test]
+    fn creates_notebooks_and_deduplicates_words() {
+        let storage = storage();
+        let notebook = storage.create_notebook("好句本").unwrap();
+        assert_eq!(notebook.word_count, 0);
+
+        let word = storage
+            .add_word_to_notebook(notebook.id, "Serendipity", "/ˌserənˈdɪpəti/", "意外之喜")
+            .unwrap();
+        assert_eq!(word.word, "Serendipity");
+        assert_eq!(
+            storage
+                .list_notebook_words(notebook.id, None, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        storage
+            .add_word_to_notebook(notebook.id, "serendipity", "", "更新释义")
+            .unwrap();
+        let words = storage.list_notebook_words(notebook.id, None, 20).unwrap();
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].definition, "更新释义");
+        assert_eq!(
+            storage
+                .list_notebooks()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == notebook.id)
+                .unwrap()
+                .word_count,
+            1
+        );
+
+        storage.remove_notebook_word(word.id).unwrap();
+        assert!(
+            storage
+                .list_notebook_words(notebook.id, None, 20)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_notebook_names() {
+        let storage = storage();
+        storage.create_notebook("复习本").unwrap();
+        assert!(storage.create_notebook("复习本").is_err());
+        assert!(storage.create_notebook("   ").is_err());
     }
 }

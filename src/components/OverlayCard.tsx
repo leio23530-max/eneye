@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon } from "./Icon";
 import { IconButton } from "./IconButton";
-import type { AppSettings, LookupResult, TranslationState } from "../types";
+import type {
+  AppSettings,
+  LookupResult,
+  Notebook,
+  TranslationState,
+} from "../types";
+import { addWordToNotebook, listNotebooks } from "../lib/api";
 import { sanitizeDictionaryHtml } from "../lib/dictionary-html";
+import { isTauriRuntime } from "../lib/tauri";
 
 interface OverlayCardProps {
   lookup: LookupResult;
@@ -69,6 +77,11 @@ export function OverlayCard({
   const [pinned, setPinned] = useState(false);
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [bookmarkOpen, setBookmarkOpen] = useState(false);
+  const [bookmarkBusy, setBookmarkBusy] = useState(false);
+  const [bookmarkError, setBookmarkError] = useState("");
+  const [savedTo, setSavedTo] = useState<string | null>(null);
+  const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const {
     ref: scrollRef,
     showJump,
@@ -116,6 +129,50 @@ export function OverlayCard({
     window.speechSynthesis.speak(utterance);
   }
 
+  async function toggleBookmarkPicker() {
+    if (bookmarkOpen) {
+      setBookmarkOpen(false);
+      return;
+    }
+    setBookmarkError("");
+    setBookmarkOpen(true);
+    try {
+      setNotebooks(await listNotebooks());
+    } catch (error) {
+      setBookmarkError(String(error));
+    }
+  }
+
+  async function saveToNotebook(notebook: Notebook) {
+    if (bookmarkBusy) return;
+    setBookmarkBusy(true);
+    setBookmarkError("");
+    try {
+      const definition =
+        main?.definitions.join("；") ?? translation?.output ?? "";
+      await addWordToNotebook(
+        notebook.id,
+        lookup.word,
+        main?.phonetic ?? "",
+        definition,
+      );
+      setSavedTo(notebook.name);
+      setBookmarkOpen(false);
+    } catch (error) {
+      setBookmarkError(String(error));
+    } finally {
+      setBookmarkBusy(false);
+    }
+  }
+
+  function startDragging(event: React.MouseEvent<HTMLElement>) {
+    if (!isTauriRuntime()) return;
+    if ((event.target as HTMLElement).closest("button,a,input,textarea")) {
+      return;
+    }
+    void getCurrentWindow().startDragging();
+  }
+
   const cardStyle = {
     "--headword-font": `"${settings.headwordFont}", Georgia, serif`,
     "--body-font": `"${settings.bodyFont}", "Segoe UI", "Microsoft YaHei UI", sans-serif`,
@@ -128,7 +185,7 @@ export function OverlayCard({
       data-pinned={pinned}
       style={cardStyle}
     >
-      <header className="card-header">
+      <header className="card-header" onMouseDown={startDragging}>
         <div className="headword-row">
           <div>
             <h1 className="headword">{lookup.word}</h1>
@@ -147,6 +204,12 @@ export function OverlayCard({
           </div>
           <div className="card-actions">
             <IconButton
+              active={Boolean(savedTo) || bookmarkOpen}
+              icon="bookmark"
+              label={savedTo ? `已收藏到 ${savedTo}` : "收藏到本子"}
+              onClick={() => void toggleBookmarkPicker()}
+            />
+            <IconButton
               active={pinned}
               icon="pin"
               label={pinned ? "取消固定" : "固定卡片"}
@@ -161,6 +224,45 @@ export function OverlayCard({
           </div>
         </div>
       </header>
+
+      {bookmarkOpen && (
+        <div aria-label="收藏到本子" className="bookmark-popover" role="dialog">
+          <div className="bookmark-popover-head">
+            <strong>收藏到</strong>
+            <button
+              aria-label="关闭收藏面板"
+              className="bookmark-close"
+              onClick={() => setBookmarkOpen(false)}
+              type="button"
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+          {notebooks.map((notebook) => (
+            <button
+              className="bookmark-option"
+              disabled={bookmarkBusy}
+              key={notebook.id}
+              onClick={() => void saveToNotebook(notebook)}
+              type="button"
+            >
+              <Icon name="book" size={15} />
+              <span>{notebook.name}</span>
+              <small>{notebook.wordCount}</small>
+            </button>
+          ))}
+          {notebooks.length === 0 && (
+            <p className="bookmark-empty">还没有本子，请到“生词本”里新建。</p>
+          )}
+          {bookmarkError && <p className="bookmark-error">{bookmarkError}</p>}
+        </div>
+      )}
+
+      {savedTo && (
+        <p className="bookmark-toast" role="status">
+          已收藏到「{savedTo}」
+        </p>
+      )}
 
       <div
         aria-label="词典内容"

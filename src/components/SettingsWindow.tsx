@@ -4,14 +4,16 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { FONT_OPTIONS } from "../data/sample";
 import {
   addExternalDictionary,
-  clearHistory,
+  createNotebook,
   deleteAiKey,
-  deleteHistory,
+  deleteNotebook,
   detectAgentConnections,
-  getHistory,
   getCaptureDiagnostics,
   listAiModels,
+  listNotebooks,
+  listNotebookWords,
   removeExternalDictionary,
+  removeNotebookWord,
   reorderExternalDictionaries,
   setAiKey,
 } from "../lib/api";
@@ -23,7 +25,8 @@ import type {
   AiRoles,
   DictionaryStatus,
   ExternalDictionary,
-  HistoryRecord,
+  Notebook,
+  NotebookWord,
   WordProbeReport,
 } from "../types";
 import { Icon } from "./Icon";
@@ -38,7 +41,7 @@ const sections: Array<{
   { id: "general", label: "通用", icon: "book" },
   { id: "dictionary", label: "词典", icon: "folder" },
   { id: "ai", label: "AI 翻译", icon: "sparkles" },
-  { id: "history", label: "历史", icon: "history" },
+  { id: "history", label: "生词本", icon: "book" },
   { id: "diagnostics", label: "诊断", icon: "pulse" },
 ];
 
@@ -162,9 +165,17 @@ export function SettingsWindow({
   const [modelError, setModelError] = useState("");
   const [apiEditorOpen, setApiEditorOpen] = useState(false);
   const [apiTestStatus, setApiTestStatus] = useState("");
-  const [history, setHistory] = useState<HistoryRecord[]>([]);
-  const [historyQuery, setHistoryQuery] = useState("");
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [notebooks, setNotebooks] = useState<Notebook[]>([]);
+  const [selectedNotebookId, setSelectedNotebookId] = useState<number | null>(
+    null,
+  );
+  const [notebookWords, setNotebookWords] = useState<NotebookWord[]>([]);
+  const [notebookQuery, setNotebookQuery] = useState("");
+  const [notebookLoading, setNotebookLoading] = useState(false);
+  const [notebookError, setNotebookError] = useState("");
+  const [creatingNotebook, setCreatingNotebook] = useState(false);
+  const [newNotebookName, setNewNotebookName] = useState("");
+  const [notebookSaving, setNotebookSaving] = useState(false);
   const [probeReport, setProbeReport] = useState<WordProbeReport | null>(null);
   const [liveAgentConnections, setLiveAgentConnections] =
     useState<AgentConnectionStatus[]>(agentConnections);
@@ -194,6 +205,8 @@ export function SettingsWindow({
       ),
     [modelOptions, settings.aiModel, settings.aiRoles],
   );
+  const activeNotebook =
+    notebooks.find((notebook) => notebook.id === selectedNotebookId) ?? null;
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onSettingsChange({ ...settings, [key]: value });
@@ -254,18 +267,49 @@ export function SettingsWindow({
   useEffect(() => {
     if (section !== "history") return;
     let active = true;
-    setHistoryLoading(true);
-    getHistory(historyQuery, 200)
-      .then((records) => {
-        if (active) setHistory(records);
+    setNotebookLoading(true);
+    listNotebooks()
+      .then((items) => {
+        if (!active) return;
+        setNotebooks(items);
+        setSelectedNotebookId((current) =>
+          current != null && items.some((item) => item.id === current)
+            ? current
+            : (items[0]?.id ?? null),
+        );
+      })
+      .catch((error) => {
+        if (active) setNotebookError(String(error));
       })
       .finally(() => {
-        if (active) setHistoryLoading(false);
+        if (active) setNotebookLoading(false);
       });
     return () => {
       active = false;
     };
-  }, [historyQuery, section]);
+  }, [section]);
+
+  useEffect(() => {
+    if (section !== "history" || selectedNotebookId == null) {
+      setNotebookWords([]);
+      return;
+    }
+    let active = true;
+    setNotebookLoading(true);
+    listNotebookWords(selectedNotebookId, notebookQuery)
+      .then((words) => {
+        if (active) setNotebookWords(words);
+      })
+      .catch((error) => {
+        if (active) setNotebookError(String(error));
+      })
+      .finally(() => {
+        if (active) setNotebookLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [notebookQuery, section, selectedNotebookId]);
 
   useEffect(() => {
     if (section !== "diagnostics") return;
@@ -378,14 +422,62 @@ export function SettingsWindow({
     }
   }
 
-  async function removeHistoryRecord(id: number) {
-    await deleteHistory(id);
-    setHistory((records) => records.filter((record) => record.id !== id));
+  async function refreshNotebooks(selectId?: number | null) {
+    setNotebookLoading(true);
+    try {
+      const items = await listNotebooks();
+      setNotebooks(items);
+      setSelectedNotebookId((current) => {
+        const candidate = selectId ?? current;
+        return candidate != null && items.some((item) => item.id === candidate)
+          ? candidate
+          : (items[0]?.id ?? null);
+      });
+    } catch (error) {
+      setNotebookError(String(error));
+    } finally {
+      setNotebookLoading(false);
+    }
   }
 
-  async function removeAllHistory() {
-    await clearHistory();
-    setHistory([]);
+  async function submitNewNotebook() {
+    const name = newNotebookName.trim();
+    if (!name || notebookSaving) return;
+    setNotebookSaving(true);
+    setNotebookError("");
+    try {
+      const notebook = await createNotebook(name);
+      setNewNotebookName("");
+      setCreatingNotebook(false);
+      await refreshNotebooks(notebook.id);
+    } catch (error) {
+      setNotebookError(String(error));
+    } finally {
+      setNotebookSaving(false);
+    }
+  }
+
+  async function removeCurrentNotebook() {
+    if (selectedNotebookId == null) return;
+    if (!window.confirm("删除这个本子以及里面的所有单词？")) return;
+    setNotebookError("");
+    try {
+      await deleteNotebook(selectedNotebookId);
+      await refreshNotebooks(null);
+    } catch (error) {
+      setNotebookError(String(error));
+    }
+  }
+
+  async function removeWordFromNotebook(id: number) {
+    setNotebookError("");
+    try {
+      await removeNotebookWord(id);
+      setNotebookWords((words) => words.filter((word) => word.id !== id));
+      await refreshNotebooks(selectedNotebookId);
+    } catch (error) {
+      setNotebookError(String(error));
+    }
   }
 
   async function importDictionary() {
@@ -502,7 +594,7 @@ export function SettingsWindow({
                 <input
                   aria-label="悬浮停留时间"
                   max="500"
-                  min="150"
+                  min="100"
                   onChange={(event) =>
                     update("lookupDelayMs", Number(event.target.value))
                   }
@@ -511,7 +603,7 @@ export function SettingsWindow({
                   value={settings.lookupDelayMs}
                 />
                 <span className="range-labels">
-                  <span>灵敏 150ms</span>
+                  <span>灵敏 100ms</span>
                   <span>稳定 500ms</span>
                 </span>
               </label>
@@ -520,7 +612,7 @@ export function SettingsWindow({
                 <input
                   aria-label="移开后保留时间"
                   max="5000"
-                  min="500"
+                  min="0"
                   onChange={(event) =>
                     update("wordCardLingerMs", Number(event.target.value))
                   }
@@ -529,8 +621,13 @@ export function SettingsWindow({
                   value={settings.wordCardLingerMs}
                 />
                 <span className="range-labels">
-                  <span>快速 500ms</span>
-                  <span>当前 {settings.wordCardLingerMs}ms</span>
+                  <span>立即 0ms</span>
+                  <span>
+                    当前{" "}
+                    {settings.wordCardLingerMs === 0
+                      ? "立即"
+                      : `${settings.wordCardLingerMs}ms`}
+                  </span>
                   <span>持久 5000ms</span>
                 </span>
               </label>
@@ -1064,63 +1161,161 @@ export function SettingsWindow({
         )}
         {section === "history" && (
           <div className="settings-stack">
-            <section className="settings-section history-section">
-              <div className="history-toolbar">
-                <label className="search-field">
-                  <Icon name="search" size={17} />
-                  <span className="sr-only">搜索查询历史</span>
-                  <input
-                    aria-label="搜索查询历史"
-                    onChange={(event) => setHistoryQuery(event.target.value)}
-                    placeholder="搜索单词或译文"
-                    type="search"
-                    value={historyQuery}
-                  />
-                </label>
-                <button
-                  className="text-button danger-text"
-                  disabled={history.length === 0}
-                  onClick={removeAllHistory}
-                  type="button"
-                >
-                  清空历史
-                </button>
-              </div>
-              {historyLoading ? (
-                <div className="history-empty">正在读取本地历史…</div>
-              ) : history.length === 0 ? (
-                <div className="history-empty">
-                  <Icon name="history" size={24} />
-                  还没有查询记录
-                </div>
-              ) : (
-                <div className="history-list">
-                  {history.map((record) => (
-                    <article className="history-item" key={record.id}>
-                      <span className="history-kind">
-                        {record.kind === "word" ? "词" : "句"}
-                      </span>
-                      <div>
-                        <strong>{record.text}</strong>
-                        {record.translation && <p>{record.translation}</p>}
-                        <small>
-                          {new Date(record.createdAt).toLocaleString("zh-CN")}
-                          {record.dictionaries.length > 0 &&
-                            ` · ${record.dictionaries.join(" / ")}`}
-                        </small>
-                      </div>
+            <section className="settings-section notebook-section">
+              <div className="notebook-layout">
+                <aside className="notebook-sidebar">
+                  <div className="notebook-sidebar-head">
+                    <span>我的本子</span>
+                    <button
+                      aria-label="新建本子"
+                      className="icon-button"
+                      onClick={() => {
+                        setCreatingNotebook(true);
+                        setNotebookError("");
+                      }}
+                      type="button"
+                    >
+                      <Icon name="plus" size={16} />
+                    </button>
+                  </div>
+                  {creatingNotebook && (
+                    <form
+                      className="notebook-create-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void submitNewNotebook();
+                      }}
+                    >
+                      <input
+                        aria-label="新本子名称"
+                        autoFocus
+                        maxLength={24}
+                        onChange={(event) =>
+                          setNewNotebookName(event.target.value)
+                        }
+                        placeholder="例如：生词本"
+                        value={newNotebookName}
+                      />
                       <button
-                        aria-label={`删除 ${record.text}`}
-                        className="history-delete"
-                        onClick={() => removeHistoryRecord(record.id)}
+                        className="primary-button"
+                        disabled={notebookSaving || !newNotebookName.trim()}
+                        type="submit"
+                      >
+                        创建
+                      </button>
+                      <button
+                        className="text-button"
+                        onClick={() => {
+                          setCreatingNotebook(false);
+                          setNewNotebookName("");
+                        }}
                         type="button"
                       >
-                        <Icon name="close" size={15} />
+                        取消
                       </button>
-                    </article>
-                  ))}
+                    </form>
+                  )}
+                  <div className="notebook-list">
+                    {notebooks.map((notebook) => (
+                      <div
+                        className={`notebook-row ${
+                          notebook.id === selectedNotebookId ? "is-active" : ""
+                        }`}
+                        key={notebook.id}
+                      >
+                        <button
+                          className="notebook-select"
+                          onClick={() => setSelectedNotebookId(notebook.id)}
+                          type="button"
+                        >
+                          <Icon name="book" size={15} />
+                          <span>{notebook.name}</span>
+                          <small>{notebook.wordCount}</small>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  {notebooks.length === 0 && (
+                    <p className="notebook-hint">
+                      还没有本子。点右上角的 + 创建一个。
+                    </p>
+                  )}
+                </aside>
+
+                <div className="notebook-main">
+                  <div className="notebook-main-head">
+                    <div>
+                      <h3>{activeNotebook?.name ?? "生词本"}</h3>
+                      <p>
+                        {activeNotebook
+                          ? `${activeNotebook.wordCount} 个单词`
+                          : "选择一个本子，或先创建一个。"}
+                      </p>
+                    </div>
+                    {activeNotebook && (
+                      <button
+                        className="text-button danger-text"
+                        onClick={() => void removeCurrentNotebook()}
+                        type="button"
+                      >
+                        删除本子
+                      </button>
+                    )}
+                  </div>
+                  <label className="search-field">
+                    <Icon name="search" size={17} />
+                    <span className="sr-only">搜索本子里的单词</span>
+                    <input
+                      aria-label="搜索本子里的单词"
+                      disabled={!activeNotebook}
+                      onChange={(event) => setNotebookQuery(event.target.value)}
+                      placeholder="搜索单词或释义"
+                      type="search"
+                      value={notebookQuery}
+                    />
+                  </label>
+                  {notebookError && (
+                    <p className="inline-error" role="alert">
+                      <Icon name="alert" size={16} />
+                      {notebookError}
+                    </p>
+                  )}
+                  {notebookLoading ? (
+                    <div className="history-empty">正在读取本子…</div>
+                  ) : notebookWords.length === 0 ? (
+                    <div className="history-empty">
+                      <Icon name="book" size={24} />
+                      {notebookQuery
+                        ? "没有匹配的单词"
+                        : "这个本子还是空的。把鼠标停在单词上，点悬浮窗里的收藏按钮就能放进来。"}
+                    </div>
+                  ) : (
+                    <div className="history-list">
+                      {notebookWords.map((word) => (
+                        <article className="history-item" key={word.id}>
+                          <span className="history-kind">词</span>
+                          <div>
+                            <strong>{word.word}</strong>
+                            {word.phonetic && <small>{word.phonetic}</small>}
+                            {word.definition && <p>{word.definition}</p>}
+                            <small>
+                              {new Date(word.createdAt).toLocaleString("zh-CN")}
+                            </small>
+                          </div>
+                          <button
+                            aria-label={`从本子移除 ${word.word}`}
+                            className="history-delete"
+                            onClick={() => void removeWordFromNotebook(word.id)}
+                            type="button"
+                          >
+                            <Icon name="close" size={15} />
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </section>
           </div>
         )}

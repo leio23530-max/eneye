@@ -12,6 +12,8 @@ type IconName =
   | "close"
   | "chevron"
   | "check"
+  | "plus"
+  | "bookmark"
   | "search"
   | "pause"
   | "play"
@@ -77,6 +79,13 @@ const paths: Record<IconName, React.ReactNode> = {
   ),
   chevron: <path d="m8 10 4 4 4-4" />,
   check: <path d="m5 12 4 4L19 6" />,
+  plus: (
+    <>
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </>
+  ),
+  bookmark: <path d="M6 4h12v17l-6-4-6 4V4Z" />,
   search: (
     <>
       <circle cx="11" cy="11" r="7" />

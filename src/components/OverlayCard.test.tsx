@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resetPreviewNotebooks } from "../lib/api";
 import { OverlayCard } from "./OverlayCard";
 import {
   DEFAULT_SETTINGS,
@@ -8,7 +9,21 @@ import {
   SAMPLE_TRANSLATION,
 } from "../data/sample";
 
+beforeEach(() => {
+  resetPreviewNotebooks();
+});
+
 describe("OverlayCard", () => {
+  it("saves the current word into a notebook", async () => {
+    const user = userEvent.setup();
+    render(<OverlayCard lookup={SAMPLE_LOOKUP} settings={DEFAULT_SETTINGS} />);
+
+    await user.click(screen.getByRole("button", { name: "收藏到本子" }));
+    expect(screen.getByRole("dialog", { name: "收藏到本子" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /生词本/ }));
+    expect(await screen.findByText("已收藏到「生词本」")).toBeVisible();
+  });
+
   it("shows the primary word and expands secondary dictionaries", async () => {
     const user = userEvent.setup();
     render(

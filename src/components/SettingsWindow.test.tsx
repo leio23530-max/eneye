@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetPreviewNotebooks } from "../lib/api";
 import { DEFAULT_SETTINGS } from "../data/sample";
 import type { AppSettings } from "../types";
 import { SettingsWindow } from "./SettingsWindow";
@@ -47,6 +48,10 @@ function Harness() {
     />
   );
 }
+
+beforeEach(() => {
+  resetPreviewNotebooks();
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -125,6 +130,24 @@ describe("SettingsWindow", () => {
 
     await user.click(screen.getByRole("button", { name: "AI 翻译" }));
     expect(screen.getByRole("heading", { name: "Agent 连接" })).toBeVisible();
+  });
+
+  it("creates a notebook and selects it", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("button", { name: "生词本" }));
+    expect(await screen.findByText("我的本子")).toBeVisible();
+    expect(
+      (await screen.findAllByRole("button", { name: /生词本/ })).length,
+    ).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "新建本子" }));
+    await user.type(screen.getByLabelText("新本子名称"), "复习本");
+    await user.click(screen.getByRole("button", { name: "创建" }));
+
+    expect(await screen.findByRole("button", { name: /复习本/ })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "复习本" })).toBeVisible();
   });
 
   it("saves a new AI key through the credential callback", async () => {
