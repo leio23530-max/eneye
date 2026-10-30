@@ -217,6 +217,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
 
             if down_at.is_some()
                 || point_inside_own_process(pointer)
+                || (overlay_is_visible(&app) && point_inside_overlay(&app, pointer))
                 || overlay_mode(&app) == OverlayMode::Translation
                 || (overlay_pinned(&app) && overlay_is_visible(&app))
             {
@@ -533,10 +534,14 @@ fn point_inside_overlay(app: &tauri::AppHandle, point: (i32, i32)) -> bool {
     let Ok(size) = window.inner_size() else {
         return false;
     };
-    point.0 >= position.x
-        && point.1 >= position.y
-        && point.0 < position.x + size.width as i32
-        && point.1 < position.y + size.height as i32
+    point_in_window_bounds((position.x, position.y), (size.width, size.height), point)
+}
+
+fn point_in_window_bounds(position: (i32, i32), size: (u32, u32), point: (i32, i32)) -> bool {
+    point.0 >= position.0
+        && point.1 >= position.1
+        && point.0 < position.0 + size.0 as i32
+        && point.1 < position.1 + size.1 as i32
 }
 
 #[cfg(windows)]
@@ -1141,6 +1146,17 @@ mod tests {
             (400, 400),
             Some((100, 100)),
         ));
+    }
+
+    #[test]
+    fn overlay_rectangle_owns_the_pointer() {
+        let position = (100, 100);
+        let size = (440, 610);
+        assert!(point_in_window_bounds(position, size, (100, 100)));
+        assert!(point_in_window_bounds(position, size, (539, 709)));
+        assert!(!point_in_window_bounds(position, size, (99, 100)));
+        assert!(!point_in_window_bounds(position, size, (540, 100)));
+        assert!(!point_in_window_bounds(position, size, (100, 710)));
     }
 
     #[test]
