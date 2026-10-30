@@ -173,6 +173,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     down_at = Some((x, y));
                     down_on_overlay =
                         overlay_is_visible(&app) && point_inside_overlay(&app, (x, y));
+                    leave_since = None;
                     stable_since = Instant::now();
                     preflight = None;
                     resolved_for_dwell = false;
@@ -202,6 +203,9 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     if dragged && !selection_blocked {
                         handle_selection(&app, &automation, start, (x, y));
                     }
+                    if down_on_overlay {
+                        leave_since = None;
+                    }
                     down_on_overlay = false;
                     stability_anchor = pointer;
                     stable_since = Instant::now();
@@ -220,9 +224,13 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             }
 
             if let Some(since) = leave_since
-                && since.elapsed() >= Duration::from_millis(word_linger(&app))
-                && !overlay_pinned(&app)
-                && !point_inside_overlay(&app, pointer)
+                && should_hide_after_leave(
+                    down_at.is_some(),
+                    since.elapsed(),
+                    word_linger(&app),
+                    overlay_pinned(&app),
+                    point_inside_overlay(&app, pointer),
+                )
             {
                 hide_overlay(&app);
                 leave_since = None;
@@ -882,6 +890,16 @@ fn outside_word_anchor(pointer: (i32, i32), anchor: Option<(i32, i32)>) -> bool 
         .unwrap_or(true)
 }
 
+fn should_hide_after_leave(
+    dragging: bool,
+    elapsed: Duration,
+    linger_ms: u64,
+    pinned: bool,
+    inside_overlay: bool,
+) -> bool {
+    !dragging && !pinned && !inside_overlay && elapsed >= Duration::from_millis(linger_ms)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn selection_should_be_ignored(
     down_on_overlay: bool,
@@ -1175,6 +1193,45 @@ mod tests {
             false,
             (400, 400),
             Some((100, 100)),
+        ));
+    }
+
+    #[test]
+    fn dragging_the_card_never_starts_the_auto_hide_timer() {
+        assert!(!should_hide_after_leave(
+            true,
+            Duration::from_secs(5),
+            250,
+            false,
+            false
+        ));
+        assert!(should_hide_after_leave(
+            false,
+            Duration::from_millis(250),
+            250,
+            false,
+            false
+        ));
+        assert!(!should_hide_after_leave(
+            false,
+            Duration::from_millis(249),
+            250,
+            false,
+            false
+        ));
+        assert!(!should_hide_after_leave(
+            false,
+            Duration::from_secs(5),
+            250,
+            false,
+            true
+        ));
+        assert!(!should_hide_after_leave(
+            false,
+            Duration::from_secs(5),
+            250,
+            true,
+            false
         ));
     }
 
