@@ -7,6 +7,7 @@ import type {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   lookupDelayMs: 240,
+  wordCardLingerMs: 1500,
   autoTranslate: true,
   launchAtStartup: false,
   headwordFont: "Georgia",
@@ -14,8 +15,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sourceLanguage: "auto",
   targetLanguage: "简体中文",
   aiProtocol: "auto",
+  aiConnectionName: "API",
   aiBaseUrl: "https://api.deepseek.com",
   aiModel: "",
+  aiRoles: {
+    chat: { connectionId: "api", model: "", effort: "medium" },
+    translation: { connectionId: "api", model: "", effort: "medium" },
+    image: { connectionId: "api", model: "", effort: "medium" },
+  },
+  unsupportedReasoningModels: [],
 };
 
 export const FONT_OPTIONS: FontOption[] = [

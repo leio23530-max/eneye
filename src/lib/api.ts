@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DEFAULT_SETTINGS, FONT_OPTIONS, SAMPLE_LOOKUP } from "../data/sample";
 import type {
+  AgentConnectionStatus,
   AppSettings,
   BootstrapData,
   HistoryRecord,
@@ -9,6 +10,7 @@ import type {
   LookupResult,
   TranslationEvent,
   TranslationRequest,
+  WordProbeReport,
 } from "../types";
 import { isTauriRuntime } from "./tauri";
 
@@ -22,6 +24,26 @@ const previewBootstrap: BootstrapData = {
     path: "浏览器预览数据",
   },
   externalDictionaries: [],
+  agentConnections: [
+    {
+      id: "codex",
+      name: "Codex",
+      available: true,
+      detail: "浏览器预览状态",
+    },
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      available: false,
+      detail: "未在 PATH 中检测到 claude",
+    },
+    {
+      id: "kimi-code",
+      name: "Kimi Code",
+      available: false,
+      detail: "未在 PATH 中检测到 kimi",
+    },
+  ],
   aiKeyConfigured: false,
   ocrAvailable: true,
 };
@@ -29,6 +51,13 @@ const previewBootstrap: BootstrapData = {
 export async function loadBootstrap(): Promise<BootstrapData> {
   if (!isTauriRuntime()) return previewBootstrap;
   return invoke<BootstrapData>("get_bootstrap");
+}
+
+export async function detectAgentConnections(): Promise<
+  AgentConnectionStatus[]
+> {
+  if (!isTauriRuntime()) return previewBootstrap.agentConnections;
+  return invoke<AgentConnectionStatus[]>("detect_agent_connections");
 }
 
 export async function saveSettings(
@@ -55,6 +84,11 @@ export async function getHistory(
     query: query?.trim() || null,
     limit,
   });
+}
+
+export async function getCaptureDiagnostics(): Promise<WordProbeReport | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<WordProbeReport>("get_capture_diagnostics");
 }
 
 export async function addExternalDictionary(

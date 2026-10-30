@@ -97,6 +97,20 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!translation) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") void hide();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [translation]);
+
+  useEffect(() => {
+    if (!lookup || preview) return;
+    void invoke("set_overlay_pinned", { pinned: false });
+  }, [lookup?.normalizedWord, preview]);
+
   async function hide() {
     await invoke("hide_overlay");
   }
@@ -136,6 +150,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     return (
       <main className="overlay-stage">
         <OverlayCard
+          key={lookup.normalizedWord}
           onClose={() => void hide()}
           onPinChange={(value) => void changePinned(value)}
           settings={settings}
@@ -151,9 +166,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
         <TranslationOverlayCard
           onCancel={() => void cancelTranslation(translation.requestId)}
           onClose={() => void hide()}
-          onPinChange={(value) => void changePinned(value)}
           onRetry={retryTranslation}
-          pinned={pinned}
           settings={settings}
           translation={translation}
         />
@@ -174,25 +187,21 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
   );
 }
 
-function TranslationOverlayCard({
+export function TranslationOverlayCard({
   translation,
   settings,
-  pinned,
   onClose,
-  onPinChange,
   onCancel,
   onRetry,
 }: {
   translation: TranslationState;
   settings: AppSettings;
-  pinned: boolean;
   onClose: () => void;
-  onPinChange: (value: boolean) => void;
   onCancel: () => void;
   onRetry: () => void;
 }) {
   return (
-    <article className="translation-card" data-pinned={pinned}>
+    <article className="translation-card">
       <header className="translation-card-header">
         <div>
           <p className="eyebrow">AI TRANSLATION</p>
@@ -206,12 +215,11 @@ function TranslationOverlayCard({
         </div>
         <div className="card-actions">
           <IconButton
-            active={pinned}
-            icon="pin"
-            label={pinned ? "取消固定" : "固定卡片"}
-            onClick={() => onPinChange(!pinned)}
+            className="translation-close"
+            icon="close"
+            label="关闭卡片"
+            onClick={onClose}
           />
-          <IconButton icon="close" label="关闭卡片" onClick={onClose} />
         </div>
       </header>
       <div className="translation-card-body">

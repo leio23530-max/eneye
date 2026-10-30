@@ -198,6 +198,9 @@ pub fn clean_lookup_word(raw: &str) -> Result<String> {
         || trimmed.len() > 96
         || !trimmed
             .chars()
+            .any(|character| character.is_ascii_alphabetic())
+        || !trimmed
+            .chars()
             .all(|character| character.is_ascii_alphabetic() || matches!(character, '\'' | '-'))
     {
         anyhow::bail!("not an English headword");
@@ -323,6 +326,7 @@ mod tests {
         );
         assert!(clean_lookup_word("two words").is_err());
         assert!(clean_lookup_word("word123").is_err());
+        assert!(clean_lookup_word("-").is_err());
     }
 
     #[test]

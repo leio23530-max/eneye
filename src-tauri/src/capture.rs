@@ -1,24 +1,34 @@
 use std::{
     sync::{
         OnceLock,
-        atomic::Ordering,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread,
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
+use crate::word_probe::{self, WordProbeReport};
 use crate::{AppState, TranslationRequest, dictionary::clean_lookup_word, translate_selection};
 
 const STABLE_RADIUS: i32 = 5;
 const PREFLIGHT_MS: u64 = 100;
-const HIDE_GRACE_MS: u64 = 180;
+const WORD_ANCHOR_RADIUS: i32 = 24;
 const DRAG_THRESHOLD: i32 = 7;
 
 static EVENT_SENDER: OnceLock<Sender<MouseInput>> = OnceLock::new();
+static TRANSLATION_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayMode {
+    Hidden,
+    Word,
+    Translation,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct MouseInput {
@@ -32,6 +42,7 @@ enum MouseInputKind {
     Move,
     Down,
     Up,
+    Escape,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,12 +85,7 @@ pub fn start(app: tauri::AppHandle) {
 pub fn ocr_available() -> bool {
     #[cfg(windows)]
     {
-        use windows::{Globalization::Language, Media::Ocr::OcrEngine, core::HSTRING};
-
-        Language::CreateLanguage(&HSTRING::from("en-US"))
-            .ok()
-            .and_then(|language| OcrEngine::TryCreateFromLanguage(&language).ok())
-            .is_some()
+        create_ocr_engine().is_some()
     }
     #[cfg(not(windows))]
     {
@@ -123,9 +129,10 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             }
         };
         let mut pointer = (0, 0);
+        let mut stability_anchor = (0, 0);
         let mut stable_since = Instant::now();
         let mut down_at: Option<(i32, i32)> = None;
-        let mut preflight: Option<HoverCandidate> = None;
+        let mut preflight: Option<(HoverCandidate, WordProbeReport)> = None;
         let mut resolved_for_dwell = false;
         let mut leave_since: Option<Instant> = None;
 
@@ -137,8 +144,9 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     x,
                     y,
                 }) => {
-                    if exceeds_stability_radius(pointer, (x, y)) {
+                    if exceeds_stability_radius(stability_anchor, (x, y)) {
                         pointer = (x, y);
+                        stability_anchor = pointer;
                         stable_since = Instant::now();
                         preflight = None;
                         resolved_for_dwell = false;
@@ -146,12 +154,15 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                         pointer = (x, y);
                     }
 
-                    if overlay_pinned(&app) {
-                        leave_since = None;
-                    } else if overlay_is_visible(&app)
-                        && !point_inside_overlay(&app, pointer)
-                        && !point_inside_own_process(pointer)
-                    {
+                    if should_start_leave_timer(
+                        overlay_mode(&app),
+                        overlay_pinned(&app),
+                        overlay_is_visible(&app),
+                        point_inside_overlay(&app, pointer),
+                        point_inside_own_process(pointer),
+                        pointer,
+                        overlay_anchor(&app),
+                    ) {
                         leave_since.get_or_insert_with(Instant::now);
                     } else {
                         leave_since = None;
@@ -163,6 +174,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     y,
                 }) => {
                     pointer = (x, y);
+                    stability_anchor = pointer;
                     down_at = Some((x, y));
                     stable_since = Instant::now();
                     preflight = None;
@@ -184,14 +196,24 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     if dragged {
                         handle_selection(&app, &automation, drag_origin.unwrap_or((x, y)), (x, y));
                     }
+                    stability_anchor = pointer;
                     stable_since = Instant::now();
+                }
+                Ok(MouseInput {
+                    kind: MouseInputKind::Escape,
+                    ..
+                }) => {
+                    if captures_escape(overlay_mode(&app)) {
+                        hide_overlay(&app);
+                        leave_since = None;
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
             if let Some(since) = leave_since
-                && since.elapsed() >= Duration::from_millis(HIDE_GRACE_MS)
+                && since.elapsed() >= Duration::from_millis(word_linger(&app))
                 && !overlay_pinned(&app)
                 && !point_inside_overlay(&app, pointer)
             {
@@ -199,19 +221,54 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                 leave_since = None;
             }
 
-            if down_at.is_some() || point_inside_own_process(pointer) {
+            if down_at.is_some()
+                || point_inside_own_process(pointer)
+                || overlay_mode(&app) == OverlayMode::Translation
+                || (overlay_pinned(&app) && overlay_is_visible(&app))
+            {
                 continue;
             }
 
             let elapsed = stable_since.elapsed().as_millis() as u64;
             let delay = lookup_delay(&app);
             if elapsed >= PREFLIGHT_MS && preflight.is_none() && !resolved_for_dwell {
-                preflight = uia_word_at(&automation, pointer);
+                let probe_point = pointer;
+                let accessible = word_probe::probe_accessible(&automation, pointer);
+                if !cursor_still_matches(probe_point) {
+                    pointer = current_cursor_position();
+                    stability_anchor = pointer;
+                    stable_since = Instant::now();
+                    preflight = None;
+                    resolved_for_dwell = false;
+                    continue;
+                }
+                let candidate = match accessible.word {
+                    Some((text, "msaa")) => HoverCandidate::Word {
+                        text,
+                        source: "msaa".into(),
+                    },
+                    Some((text, "win32")) => HoverCandidate::Word {
+                        text,
+                        source: "win32".into(),
+                    },
+                    Some((text, _)) => HoverCandidate::Word {
+                        text,
+                        source: "uia".into(),
+                    },
+                    None => HoverCandidate::Ocr {
+                        x: pointer.0,
+                        y: pointer.1,
+                    },
+                };
+                if let Ok(mut last_probe) = app.state::<AppState>().last_word_probe.lock() {
+                    *last_probe = accessible.report.clone();
+                }
+                preflight = Some((candidate, accessible.report));
             }
             if elapsed < delay || resolved_for_dwell {
                 continue;
             }
-            let Some(candidate) = preflight.take() else {
+            let Some((candidate, mut report)) = preflight.take() else {
                 continue;
             };
             resolved_for_dwell = true;
@@ -222,18 +279,60 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                 }
                 HoverCandidate::Ocr { x, y } => {
                     if !ocr_available() {
+                        word_probe::update_ocr_stage(
+                            &mut report,
+                            false,
+                            Duration::ZERO,
+                            "系统没有可用的 OCR 语言包".into(),
+                        );
+                        store_probe_report(&app, &report);
                         hide_overlay(&app);
                         continue;
                     }
-                    show_loading(&app, "ocr");
+                    show_loading(&app, "ocr", (x, y));
+                    let ocr_started = Instant::now();
                     match ocr_word_at(x, y) {
                         Ok(Some(word)) => {
+                            if !cursor_still_matches(pointer) {
+                                hide_overlay(&app);
+                                continue;
+                            }
+                            word_probe::update_ocr_stage(
+                                &mut report,
+                                true,
+                                ocr_started.elapsed(),
+                                format!("命中 {word}"),
+                            );
+                            report.word = Some(word.clone());
+                            report.source = Some("ocr".into());
                             lookup(&app, &word, "ocr").filter(|lookup| !lookup.entries.is_empty())
                         }
-                        _ => None,
+                        Ok(None) => {
+                            word_probe::update_ocr_stage(
+                                &mut report,
+                                false,
+                                ocr_started.elapsed(),
+                                "OCR 未识别到鼠标下的英文单词".into(),
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            word_probe::update_ocr_stage(
+                                &mut report,
+                                false,
+                                ocr_started.elapsed(),
+                                error.to_string(),
+                            );
+                            None
+                        }
                     }
                 }
             };
+            if !cursor_still_matches(pointer) {
+                hide_overlay(&app);
+                continue;
+            }
+            store_probe_report(&app, &report);
             if let Some(result) = result {
                 show_lookup(&app, result, pointer);
             } else {
@@ -241,6 +340,12 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             }
             preflight = None;
         }
+    }
+}
+
+fn store_probe_report(app: &tauri::AppHandle, report: &WordProbeReport) {
+    if let Ok(mut last_probe) = app.state::<AppState>().last_word_probe.lock() {
+        *last_probe = report.clone();
     }
 }
 
@@ -264,13 +369,49 @@ fn lookup_delay(app: &tauri::AppHandle) -> u64 {
         .unwrap_or(240)
 }
 
+fn word_linger(app: &tauri::AppHandle) -> u64 {
+    app.state::<AppState>()
+        .settings
+        .lock()
+        .map(|settings| settings.word_card_linger_ms)
+        .unwrap_or(1500)
+}
+
+fn overlay_mode(app: &tauri::AppHandle) -> OverlayMode {
+    app.state::<AppState>()
+        .overlay_mode
+        .lock()
+        .map(|mode| *mode)
+        .unwrap_or(OverlayMode::Hidden)
+}
+
+fn overlay_anchor(app: &tauri::AppHandle) -> Option<(i32, i32)> {
+    app.state::<AppState>()
+        .overlay_anchor
+        .lock()
+        .ok()
+        .and_then(|anchor| *anchor)
+}
+
+fn set_overlay_state(app: &tauri::AppHandle, mode: OverlayMode, anchor: Option<(i32, i32)>) {
+    let state = app.state::<AppState>();
+    if let Ok(mut current_mode) = state.overlay_mode.lock() {
+        *current_mode = mode;
+    }
+    if let Ok(mut current_anchor) = state.overlay_anchor.lock() {
+        *current_anchor = anchor;
+    }
+    TRANSLATION_OVERLAY_ACTIVE.store(captures_escape(mode), Ordering::Release);
+}
+
 fn overlay_pinned(app: &tauri::AppHandle) -> bool {
     app.state::<AppState>()
         .overlay_pinned
         .load(Ordering::Relaxed)
 }
 
-fn show_loading(app: &tauri::AppHandle, source: &str) {
+fn show_loading(app: &tauri::AppHandle, source: &str, point: (i32, i32)) {
+    set_overlay_state(app, OverlayMode::Word, Some(point));
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.emit(
             "eneye://lookup-loading",
@@ -283,6 +424,7 @@ fn show_loading(app: &tauri::AppHandle, source: &str) {
 }
 
 fn show_lookup(app: &tauri::AppHandle, lookup: crate::models::LookupResult, point: (i32, i32)) {
+    set_overlay_state(app, OverlayMode::Word, Some(point));
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.emit("eneye://lookup", lookup);
         position_overlay(app, point);
@@ -291,6 +433,7 @@ fn show_lookup(app: &tauri::AppHandle, lookup: crate::models::LookupResult, poin
 }
 
 fn show_selection(app: &tauri::AppHandle, payload: SelectionPayload, point: (i32, i32)) {
+    set_overlay_state(app, OverlayMode::Translation, Some(point));
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.emit("eneye://selection", payload.clone());
         position_overlay(app, point);
@@ -312,11 +455,24 @@ fn show_selection(app: &tauri::AppHandle, payload: SelectionPayload, point: (i32
 }
 
 fn hide_overlay(app: &tauri::AppHandle) {
+    let can_hide = !overlay_pinned(app) || overlay_mode(app) == OverlayMode::Translation;
     if let Some(window) = app.get_webview_window("overlay")
-        && !overlay_pinned(app)
+        && can_hide
     {
         let _ = window.hide();
+        set_overlay_state(app, OverlayMode::Hidden, None);
+        app.state::<AppState>()
+            .overlay_pinned
+            .store(false, Ordering::Relaxed);
     }
+}
+
+pub(crate) fn mark_overlay_hidden() {
+    TRANSLATION_OVERLAY_ACTIVE.store(false, Ordering::Release);
+}
+
+fn captures_escape(mode: OverlayMode) -> bool {
+    mode == OverlayMode::Translation
 }
 
 fn position_and_show_overlay(app: &tauri::AppHandle) -> bool {
@@ -425,58 +581,6 @@ fn point_inside_own_process(point: (i32, i32)) -> bool {
 #[cfg(not(windows))]
 fn point_inside_own_process(_point: (i32, i32)) -> bool {
     false
-}
-
-#[cfg(windows)]
-fn uia_word_at(
-    automation: &uiautomation::UIAutomation,
-    point: (i32, i32),
-) -> Option<HoverCandidate> {
-    use uiautomation::{
-        patterns::UITextPattern,
-        types::{Point, TextUnit},
-    };
-
-    let point = Point::new(point.0, point.1);
-    let walker = automation.get_control_view_walker().ok()?;
-    let mut element = automation.element_from_point(point).ok()?;
-    for _ in 0..7 {
-        if element.is_password().unwrap_or(false) {
-            return None;
-        }
-        if let Ok(pattern) = element.get_pattern::<UITextPattern>()
-            && let Ok(range) = pattern.get_range_from_point(point)
-        {
-            let _ = range.expand_to_enclosing_unit(TextUnit::Word);
-            if let Ok(text) = range.get_text(128)
-                && let Ok(word) = clean_lookup_word(&text)
-            {
-                return Some(HoverCandidate::Word {
-                    text: word,
-                    source: "uia".into(),
-                });
-            }
-        }
-        let Ok(parent) = walker.get_parent(&element) else {
-            break;
-        };
-        element = parent;
-    }
-    Some(HoverCandidate::Ocr {
-        x: point.get_x(),
-        y: point.get_y(),
-    })
-}
-
-#[cfg(not(windows))]
-fn uia_word_at(
-    _automation: &uiautomation::UIAutomation,
-    point: (i32, i32),
-) -> Option<HoverCandidate> {
-    Some(HoverCandidate::Ocr {
-        x: point.0,
-        y: point.1,
-    })
 }
 
 #[cfg(windows)]
@@ -645,6 +749,43 @@ fn exceeds_stability_radius(previous: (i32, i32), current: (i32, i32)) -> bool {
 }
 
 #[cfg(windows)]
+fn cursor_still_matches(expected: (i32, i32)) -> bool {
+    !exceeds_stability_radius(expected, current_cursor_position())
+}
+
+#[cfg(not(windows))]
+fn cursor_still_matches(_expected: (i32, i32)) -> bool {
+    true
+}
+
+fn outside_word_anchor(pointer: (i32, i32), anchor: Option<(i32, i32)>) -> bool {
+    anchor
+        .map(|anchor| {
+            (pointer.0 - anchor.0).abs() > WORD_ANCHOR_RADIUS
+                || (pointer.1 - anchor.1).abs() > WORD_ANCHOR_RADIUS
+        })
+        .unwrap_or(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn should_start_leave_timer(
+    mode: OverlayMode,
+    pinned: bool,
+    visible: bool,
+    inside_overlay: bool,
+    inside_own_process: bool,
+    pointer: (i32, i32),
+    anchor: Option<(i32, i32)>,
+) -> bool {
+    mode == OverlayMode::Word
+        && !pinned
+        && visible
+        && !inside_overlay
+        && !inside_own_process
+        && outside_word_anchor(pointer, anchor)
+}
+
+#[cfg(windows)]
 fn ocr_word_at(x: i32, y: i32) -> anyhow::Result<Option<String>> {
     use uiautomation::{screenshots::Screenshot, types::Rect};
 
@@ -697,25 +838,45 @@ fn ocr_selection(_start: (i32, i32), _end: (i32, i32)) -> Option<String> {
 
 #[cfg(windows)]
 fn recognize_bmp(bmp: &[u8]) -> anyhow::Result<windows::Media::Ocr::OcrResult> {
+    recognize_image_bytes(bmp)
+}
+
+#[cfg(windows)]
+fn recognize_image_bytes(bytes: &[u8]) -> anyhow::Result<windows::Media::Ocr::OcrResult> {
     use windows::{
-        Globalization::Language,
         Graphics::Imaging::BitmapDecoder,
-        Media::Ocr::OcrEngine,
         Storage::Streams::{DataWriter, InMemoryRandomAccessStream},
-        core::HSTRING,
     };
 
     let stream = InMemoryRandomAccessStream::new()?;
     let writer = DataWriter::new()?;
-    writer.WriteBytes(bmp)?;
+    writer.WriteBytes(bytes)?;
     let buffer = writer.DetachBuffer()?;
     stream.WriteAsync(&buffer)?.join()?;
     stream.Seek(0)?;
     let decoder = BitmapDecoder::CreateAsync(&stream)?.join()?;
     let bitmap = decoder.GetSoftwareBitmapAsync()?.join()?;
-    let language = Language::CreateLanguage(&HSTRING::from("en-US"))?;
-    let engine = OcrEngine::TryCreateFromLanguage(&language)?;
+    let engine = create_ocr_engine()
+        .context("Windows OCR 不可用；请在系统语言设置中安装英文 OCR 可选功能")?;
     Ok(engine.RecognizeAsync(&bitmap)?.join()?)
+}
+
+#[cfg(windows)]
+fn create_ocr_engine() -> Option<windows::Media::Ocr::OcrEngine> {
+    use windows::{Globalization::Language, Media::Ocr::OcrEngine, core::HSTRING};
+
+    if let Ok(language) = Language::CreateLanguage(&HSTRING::from("en-US"))
+        && let Ok(engine) = OcrEngine::TryCreateFromLanguage(&language)
+    {
+        return Some(engine);
+    }
+    if let Ok(engine) = OcrEngine::TryCreateFromUserProfileLanguages() {
+        return Some(engine);
+    }
+    OcrEngine::AvailableRecognizerLanguages()
+        .ok()?
+        .into_iter()
+        .find_map(|language| OcrEngine::TryCreateFromLanguage(&language).ok())
 }
 
 #[cfg(windows)]
@@ -737,10 +898,11 @@ fn point_in_ocr_word(
 fn run_mouse_hook() {
     use windows::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
+        UI::Input::KeyboardAndMouse::VK_ESCAPE,
         UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, MSG, MSLLHOOKSTRUCT,
-            SetWindowsHookExW, TranslateMessage, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE,
+            CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
+            MSLLHOOKSTRUCT, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL,
+            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
         },
     };
 
@@ -765,9 +927,48 @@ fn run_mouse_hook() {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
-    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) };
-    let Ok(hook) = hook else {
-        eprintln!("failed to install mouse hook: {:?}", hook.err());
+    unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= HC_ACTION as i32
+            && wparam.0 as u32 == WM_KEYDOWN
+            && TRANSLATION_OVERLAY_ACTIVE.load(Ordering::Acquire)
+        {
+            let data = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            if data.vkCode == u32::from(VK_ESCAPE.0) {
+                if let Some(sender) = EVENT_SENDER.get() {
+                    let _ = sender.send(MouseInput {
+                        kind: MouseInputKind::Escape,
+                        x: 0,
+                        y: 0,
+                    });
+                }
+                return LRESULT(1);
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) };
+    if let Err(error) = &mouse_hook {
+        eprintln!("failed to install mouse hook: {error:?}");
+    }
+    let keyboard_hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0) };
+    if let Err(error) = &keyboard_hook {
+        eprintln!("failed to install translation Escape hook: {error:?}");
+    }
+    let Some(mouse_hook) = mouse_hook.ok() else {
+        if keyboard_hook.is_err() {
+            return;
+        }
+        let mut message = MSG::default();
+        while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+            let _ = unsafe { TranslateMessage(&message) };
+            unsafe { DispatchMessageW(&message) };
+        }
+        if let Ok(keyboard_hook) = keyboard_hook {
+            let _ = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(keyboard_hook)
+            };
+        }
         return;
     };
     let mut message = MSG::default();
@@ -775,7 +976,11 @@ fn run_mouse_hook() {
         let _ = unsafe { TranslateMessage(&message) };
         unsafe { DispatchMessageW(&message) };
     }
-    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook) };
+    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook) };
+    if let Ok(keyboard_hook) = keyboard_hook {
+        let _ =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(keyboard_hook) };
+    }
 }
 
 #[cfg(not(windows))]
@@ -799,5 +1004,67 @@ mod tests {
     fn small_pointer_jitter_does_not_start_a_new_hover_cycle() {
         assert!(!exceeds_stability_radius((100, 100), (103, 104)));
         assert!(exceeds_stability_radius((100, 100), (106, 100)));
+        assert!(!exceeds_stability_radius((103, 104), (106, 104)));
+        assert!(exceeds_stability_radius((100, 100), (106, 104)));
+    }
+
+    #[test]
+    fn word_card_keeps_open_while_pointer_remains_near_source_word() {
+        assert!(!outside_word_anchor((120, 110), Some((100, 100))));
+        assert!(outside_word_anchor((130, 100), Some((100, 100))));
+    }
+
+    #[test]
+    fn translation_card_never_starts_an_automatic_close_timer() {
+        assert!(!should_start_leave_timer(
+            OverlayMode::Translation,
+            false,
+            true,
+            false,
+            false,
+            (400, 400),
+            Some((100, 100)),
+        ));
+        assert!(should_start_leave_timer(
+            OverlayMode::Word,
+            false,
+            true,
+            false,
+            false,
+            (400, 400),
+            Some((100, 100)),
+        ));
+    }
+
+    #[test]
+    fn escape_is_captured_only_for_the_translation_card() {
+        assert!(captures_escape(OverlayMode::Translation));
+        assert!(!captures_escape(OverlayMode::Word));
+        assert!(!captures_escape(OverlayMode::Hidden));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uses_any_installed_windows_ocr_language() {
+        assert!(create_ocr_engine().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_ocr_recognizes_english_from_an_image() {
+        let result =
+            recognize_image_bytes(include_bytes!("../tests/fixtures/ocr-english.png")).unwrap();
+        let text = result
+            .Lines()
+            .unwrap()
+            .into_iter()
+            .filter_map(|line| line.Text().ok())
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.to_ascii_lowercase().contains("serendipity"),
+            "Windows OCR did not recognize the fixture: {text:?}"
+        );
     }
 }

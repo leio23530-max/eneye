@@ -1,3 +1,4 @@
+mod agents;
 mod capture;
 mod dictionary;
 mod fonts;
@@ -5,6 +6,7 @@ mod models;
 mod settings;
 mod storage;
 mod translation;
+mod word_probe;
 
 use std::{
     path::PathBuf,
@@ -33,6 +35,9 @@ struct AppState {
     dictionary: Mutex<DictionaryManager>,
     translation_tasks: TranslationTasks,
     overlay_pinned: AtomicBool,
+    last_word_probe: Mutex<word_probe::WordProbeReport>,
+    overlay_mode: Mutex<capture::OverlayMode>,
+    overlay_anchor: Mutex<Option<(i32, i32)>>,
 }
 
 impl AppState {
@@ -57,6 +62,9 @@ impl AppState {
             dictionary: Mutex::new(dictionary),
             translation_tasks: TranslationTasks::default(),
             overlay_pinned: AtomicBool::new(false),
+            last_word_probe: Mutex::new(word_probe::WordProbeReport::default()),
+            overlay_mode: Mutex::new(capture::OverlayMode::Hidden),
+            overlay_anchor: Mutex::new(None),
         })
     }
 }
@@ -101,9 +109,15 @@ fn get_bootstrap(state: State<'_, AppState>) -> Result<BootstrapData, String> {
         fonts: fonts::installed_fonts(),
         dictionary_status: dictionary,
         external_dictionaries,
+        agent_connections: agents::detect(),
         ai_key_configured: AiKeyStore::exists(),
         ocr_available: capture::ocr_available(),
     })
+}
+
+#[tauri::command]
+fn detect_agent_connections() -> Vec<agents::AgentConnectionStatus> {
+    agents::detect()
 }
 
 #[tauri::command]
@@ -197,6 +211,17 @@ fn get_dictionary_status(state: State<'_, AppState>) -> Result<DictionaryStatus,
         .lock()
         .map_err(|_| "dictionary lock is poisoned".to_owned())?
         .status())
+}
+
+#[tauri::command]
+fn get_capture_diagnostics(
+    state: State<'_, AppState>,
+) -> Result<word_probe::WordProbeReport, String> {
+    state
+        .last_word_probe
+        .lock()
+        .map(|report| report.clone())
+        .map_err(|_| "word probe lock is poisoned".to_owned())
 }
 
 #[tauri::command]
@@ -299,7 +324,7 @@ async fn translate_selection(
         .lock()
         .map_err(|_| "settings lock is poisoned".to_owned())?
         .clone();
-    if settings.ai_model.trim().is_empty() {
+    if settings.translation_model().is_empty() {
         let message = "请先选择或填写 AI 模型名称".to_owned();
         let _ = app.emit(
             "eneye://translation",
@@ -348,12 +373,23 @@ async fn translate_selection(
         .map_err(|error| error.to_string())?;
 
     match result {
-        Ok(output) => {
+        Ok(outcome) => {
+            if let Some(model) = outcome.unsupported_reasoning_model
+                && let Ok(mut settings) = state.settings.lock()
+                && settings.remember_unsupported_reasoning_model(&model)
+            {
+                match state.settings_store.save(settings.clone()) {
+                    Ok(saved) => *settings = saved,
+                    Err(error) => {
+                        eprintln!("failed to remember reasoning support for {model}: {error}")
+                    }
+                }
+            }
             state
                 .storage
                 .lock()
                 .map_err(|_| "storage lock is poisoned".to_owned())?
-                .record_translation(&original_text, &output, &source)
+                .record_translation(&original_text, &outcome.text, &source)
                 .map_err(|error| error.to_string())?;
             Ok(())
         }
@@ -389,10 +425,20 @@ fn set_overlay_pinned(pinned: bool, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn hide_overlay(app: tauri::AppHandle) {
+fn hide_overlay(app: tauri::AppHandle, state: State<'_, AppState>) {
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.hide();
     }
+    capture::mark_overlay_hidden();
+    if let Ok(mut mode) = state.overlay_mode.lock() {
+        *mode = capture::OverlayMode::Hidden;
+    }
+    if let Ok(mut anchor) = state.overlay_anchor.lock() {
+        *anchor = None;
+    }
+    state
+        .overlay_pinned
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -440,20 +486,27 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn configure_shortcuts(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    app.global_shortcut()
-        .on_shortcut("Alt+Shift+E", |app, _shortcut, event| {
+fn configure_shortcuts(app: &tauri::App) {
+    if let Err(error) = app
+        .global_shortcut()
+        .on_shortcut("Ctrl+Alt+E", |app, _shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 show_settings(app.clone());
             }
-        })?;
-    app.global_shortcut()
-        .on_shortcut("Alt+Shift+T", |app, _shortcut, event| {
+        })
+    {
+        eprintln!("failed to register Ctrl+Alt+E: {error}");
+    }
+    if let Err(error) = app
+        .global_shortcut()
+        .on_shortcut("Ctrl+Alt+T", |app, _shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 capture::translate_focused_selection(app.clone());
             }
-        })?;
-    Ok(())
+        })
+    {
+        eprintln!("failed to register Ctrl+Alt+T: {error}");
+    }
 }
 
 fn dictionary_resource_response(
@@ -537,7 +590,7 @@ pub fn run() {
             app.manage(state);
             create_overlay(app)?;
             create_tray(app)?;
-            configure_shortcuts(app)?;
+            configure_shortcuts(app);
             capture::start(app.handle().clone());
             Ok(())
         })
@@ -553,12 +606,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
+            detect_agent_connections,
             save_settings,
             lookup_word,
             get_history,
             delete_history,
             clear_history,
             get_dictionary_status,
+            get_capture_diagnostics,
             list_external_dictionaries,
             add_external_dictionary,
             remove_external_dictionary,

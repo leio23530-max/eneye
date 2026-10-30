@@ -24,6 +24,12 @@ pub struct TranslationRequest {
     pub source: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslationOutcome {
+    pub text: String,
+    pub unsupported_reasoning_model: Option<String>,
+}
+
 fn default_source() -> String {
     "uia".into()
 }
@@ -103,7 +109,7 @@ impl AiKeyStore {
         let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)?;
         entry
             .get_password()
-            .context("API Key 尚未配置；请先在“AI 翻译”设置中保存 OpenAI 兼容接口的密钥")
+            .context("API Key 尚未配置；请先在“AI 翻译”中编辑 API 连接并保存密钥")
     }
 
     pub fn exists() -> bool {
@@ -210,7 +216,7 @@ pub async fn stream_translation<F>(
     request: &TranslationRequest,
     cancel: CancellationToken,
     mut emit: F,
-) -> Result<String>
+) -> Result<TranslationOutcome>
 where
     F: FnMut(TranslationEvent),
 {
@@ -237,9 +243,10 @@ where
     let instruction = format!(
         "You are a translation engine. Translate the user's text from {source_language} to {target_language}. Return only the translation, preserve paragraph breaks, and do not add explanations."
     );
-    let body = match protocol {
+    let model = settings.translation_model();
+    let mut body = match protocol {
         AiProtocol::OpenAi => json!({
-            "model": settings.ai_model,
+            "model": model,
             "stream": true,
             "temperature": 0.2,
             "messages": [
@@ -248,7 +255,7 @@ where
             ]
         }),
         AiProtocol::Anthropic => json!({
-            "model": settings.ai_model,
+            "model": model,
             "stream": true,
             "max_tokens": 2048,
             "temperature": 0.2,
@@ -258,21 +265,60 @@ where
             ]
         }),
     };
+    if protocol == AiProtocol::OpenAi && settings.supports_reasoning_effort(model) {
+        body.as_object_mut().map(|object| {
+            object.insert(
+                "reasoning_effort".into(),
+                json!(settings.translation_effort()),
+            )
+        });
+    }
+    let mut unsupported_reasoning_model = None;
 
-    let response = tokio::select! {
+    let mut response = tokio::select! {
         _ = cancel.cancelled() => {
             emit(TranslationEvent::Cancelled { request_id: request.request_id.clone() });
             anyhow::bail!("translation cancelled");
         }
-        response = authorized_request(client.post(endpoint), protocol, api_key)
+        response = authorized_request(client.post(&endpoint), protocol, api_key)
             .json(&body)
             .send() => response.context("无法连接 AI 服务")?
     };
 
+    if response.status() == reqwest::StatusCode::BAD_REQUEST {
+        let error_body = response.text().await.unwrap_or_default();
+        let safe_error_body = redact_secret(&error_body, api_key);
+        let has_reasoning_effort = body
+            .as_object()
+            .is_some_and(|object| object.contains_key("reasoning_effort"));
+        if has_reasoning_effort && error_body.to_ascii_lowercase().contains("reasoning_effort") {
+            body.as_object_mut()
+                .map(|object| object.remove("reasoning_effort"));
+            unsupported_reasoning_model = Some(model.to_owned());
+            response = tokio::select! {
+                _ = cancel.cancelled() => {
+                    emit(TranslationEvent::Cancelled { request_id: request.request_id.clone() });
+                    anyhow::bail!("translation cancelled");
+                }
+                response = authorized_request(client.post(&endpoint), protocol, api_key)
+                    .json(&body)
+                    .send() => response.context("无法连接 AI 服务")?
+            };
+        } else {
+            anyhow::bail!(
+                "AI 服务返回 400：{}",
+                response_error_hint(400, &safe_error_body)
+            );
+        }
+    }
+
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let safe_body = body.chars().take(500).collect::<String>();
+        let safe_body = redact_secret(&body, api_key)
+            .chars()
+            .take(500)
+            .collect::<String>();
         anyhow::bail!(
             "AI 服务返回 {}：{}",
             status.as_u16(),
@@ -310,6 +356,9 @@ where
         }
     }
 
+    if !parser.finished() {
+        anyhow::bail!("AI 流意外中断，请重试");
+    }
     if output.trim().is_empty() {
         anyhow::bail!("AI 服务没有返回译文");
     }
@@ -317,7 +366,10 @@ where
         request_id: request.request_id.clone(),
         text: output.clone(),
     });
-    Ok(output)
+    Ok(TranslationOutcome {
+        text: output,
+        unsupported_reasoning_model,
+    })
 }
 
 fn validate_request(request: &TranslationRequest) -> Result<()> {
@@ -364,6 +416,7 @@ pub async fn list_models(settings: &AppSettings, api_key: &str) -> Result<Vec<St
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let body = redact_secret(&body, api_key);
         anyhow::bail!(
             "读取模型失败：{} {}",
             status.as_u16(),
@@ -421,6 +474,14 @@ fn response_error_hint(status: u16, body: &str) -> String {
         500..=599 => "服务暂时不可用，请稍后重试".into(),
         _ if !body.trim().is_empty() => body.trim().to_owned(),
         _ => "请求失败".into(),
+    }
+}
+
+fn redact_secret(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(secret, "<REDACTED>")
     }
 }
 
@@ -510,6 +571,12 @@ mod tests {
         assert_eq!(json["error"], "no key");
     }
 
+    #[test]
+    fn redacts_api_keys_from_provider_error_text() {
+        let message = redact_secret("request rejected for key sk-secret-123", "sk-secret-123");
+        assert_eq!(message, "request rejected for key <REDACTED>");
+    }
+
     #[tokio::test]
     async fn streams_from_an_openai_compatible_mock_server() {
         use tokio::{
@@ -558,11 +625,305 @@ mod tests {
         .await
         .unwrap();
         server.await.unwrap();
-        assert_eq!(result, "你好");
+        assert_eq!(result.text, "你好");
+        assert_eq!(result.unsupported_reasoning_model, None);
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, TranslationEvent::Completed { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn retries_without_reasoning_effort_when_endpoint_rejects_it() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 16 * 1024];
+                let read = socket.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                if attempt == 0 {
+                    let body = r#"{"error":{"message":"unsupported parameter reasoning_effort"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                } else {
+                    let body = concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"成功\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+            }
+            requests
+        });
+
+        let mut settings = AppSettings {
+            ai_base_url: format!("http://{address}/v1"),
+            ai_model: "mock-model".into(),
+            ..AppSettings::default()
+        };
+        settings
+            .ai_roles
+            .translation
+            .model
+            .clone_from(&settings.ai_model);
+        settings.ai_roles.translation.effort = "medium".into();
+        let request = TranslationRequest {
+            request_id: "retry".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+        };
+        let outcome = stream_translation(
+            &settings,
+            "test-key",
+            &request,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(outcome.text, "成功");
+        assert_eq!(
+            outcome.unsupported_reasoning_model.as_deref(),
+            Some("mock-model")
+        );
+        assert!(requests[0].contains("reasoning_effort"));
+        assert!(!requests[1].contains("reasoning_effort"));
+    }
+
+    #[tokio::test]
+    async fn omits_reasoning_effort_for_a_remembered_model() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"成功\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        let mut settings = AppSettings {
+            ai_base_url: format!("http://{address}/v1"),
+            ai_model: "compatible-model".into(),
+            ..AppSettings::default()
+        };
+        assert!(settings.remember_unsupported_reasoning_model("compatible-model"));
+        let request = TranslationRequest {
+            request_id: "remembered".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+        };
+        let outcome = stream_translation(
+            &settings,
+            "test-key",
+            &request,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let request = server.await.unwrap();
+        assert_eq!(outcome.text, "成功");
+        assert!(!request.contains("reasoning_effort"));
+    }
+
+    #[tokio::test]
+    async fn reports_invalid_api_keys_without_echoing_the_key() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"error":"invalid key sk-secret-123"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let settings = AppSettings {
+            ai_base_url: format!("http://{address}/v1"),
+            ai_model: "mock-model".into(),
+            ..AppSettings::default()
+        };
+        let request = TranslationRequest {
+            request_id: "invalid-key".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+        };
+        let error = stream_translation(
+            &settings,
+            "sk-secret-123",
+            &request,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        server.await.unwrap();
+        assert!(error.contains("API Key 无效"));
+        assert!(!error.contains("sk-secret-123"));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_stream_that_ends_without_a_completion_marker() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"半句\"}}]}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let settings = AppSettings {
+            ai_base_url: format!("http://{address}/v1"),
+            ai_model: "mock-model".into(),
+            ..AppSettings::default()
+        };
+        let request = TranslationRequest {
+            request_id: "interrupted".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+        };
+        let error = stream_translation(
+            &settings,
+            "test-key",
+            &request,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        server.await.unwrap();
+        assert!(error.contains("AI 流意外中断"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_send_emits_a_cancelled_event() {
+        let settings = AppSettings {
+            ai_base_url: "http://127.0.0.1:9/v1".into(),
+            ai_model: "mock-model".into(),
+            ..AppSettings::default()
+        };
+        let request = TranslationRequest {
+            request_id: "cancelled".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut events = Vec::new();
+        let error = stream_translation(&settings, "test-key", &request, cancel, |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(error, "translation cancelled");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TranslationEvent::Cancelled { request_id } if request_id == "cancelled"
+        )));
+    }
+
+    #[tokio::test]
+    async fn reports_model_listing_http_errors() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"error":"unauthorized"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let settings = AppSettings {
+            ai_base_url: format!("http://{address}/v1"),
+            ..AppSettings::default()
+        };
+        let error = list_models(&settings, "test-key")
+            .await
+            .unwrap_err()
+            .to_string();
+        server.await.unwrap();
+        assert!(error.contains("读取模型失败：401"));
     }
 }

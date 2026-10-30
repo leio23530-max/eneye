@@ -46,6 +46,7 @@ pub struct BootstrapData {
     pub fonts: Vec<String>,
     pub dictionary_status: crate::dictionary::DictionaryStatus,
     pub external_dictionaries: Vec<crate::dictionary::ExternalDictionary>,
+    pub agent_connections: Vec<crate::agents::AgentConnectionStatus>,
     pub ai_key_configured: bool,
     pub ocr_available: bool,
 }

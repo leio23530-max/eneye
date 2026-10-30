@@ -39,6 +39,7 @@ export interface TranslationState {
 
 export interface AppSettings {
   lookupDelayMs: number;
+  wordCardLingerMs: number;
   autoTranslate: boolean;
   launchAtStartup: boolean;
   headwordFont: string;
@@ -46,8 +47,25 @@ export interface AppSettings {
   sourceLanguage: string;
   targetLanguage: string;
   aiProtocol: "auto" | "openai" | "anthropic";
+  aiConnectionName: string;
   aiBaseUrl: string;
   aiModel: string;
+  aiRoles: AiRoles;
+  unsupportedReasoningModels: string[];
+}
+
+export type AiEffort = "low" | "medium" | "high";
+
+export interface AiRole {
+  connectionId: string;
+  model: string;
+  effort: AiEffort;
+}
+
+export interface AiRoles {
+  chat: AiRole;
+  translation: AiRole;
+  image: AiRole;
 }
 
 export interface FontOption {
@@ -68,8 +86,16 @@ export interface BootstrapData {
   fonts: string[];
   dictionaryStatus: DictionaryStatus;
   externalDictionaries: ExternalDictionary[];
+  agentConnections: AgentConnectionStatus[];
   aiKeyConfigured: boolean;
   ocrAvailable: boolean;
+}
+
+export interface AgentConnectionStatus {
+  id: string;
+  name: string;
+  available: boolean;
+  detail: string;
 }
 
 export interface ExternalDictionary {
@@ -109,4 +135,18 @@ export interface SelectionPayload {
 
 export interface LookupLoadingPayload {
   source: RecognitionSource;
+}
+
+export interface ProbeStage {
+  provider: string;
+  available: boolean;
+  durationMs: number;
+  detail: string;
+}
+
+export interface WordProbeReport {
+  word?: string;
+  source?: string;
+  totalMs: number;
+  stages: ProbeStage[];
 }

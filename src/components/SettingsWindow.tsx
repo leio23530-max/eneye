@@ -7,7 +7,9 @@ import {
   clearHistory,
   deleteAiKey,
   deleteHistory,
+  detectAgentConnections,
   getHistory,
+  getCaptureDiagnostics,
   listAiModels,
   removeExternalDictionary,
   reorderExternalDictionaries,
@@ -15,10 +17,14 @@ import {
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/tauri";
 import type {
+  AgentConnectionStatus,
   AppSettings,
+  AiEffort,
+  AiRoles,
   DictionaryStatus,
   ExternalDictionary,
   HistoryRecord,
+  WordProbeReport,
 } from "../types";
 import { Icon } from "./Icon";
 
@@ -68,6 +74,7 @@ interface SettingsWindowProps {
   installedFonts?: string[];
   dictionaryStatus: DictionaryStatus;
   externalDictionaries: ExternalDictionary[];
+  agentConnections: AgentConnectionStatus[];
   aiKeyConfigured: boolean;
   ocrAvailable: boolean;
   onAiKeyConfiguredChange: (configured: boolean) => void;
@@ -135,6 +142,7 @@ export function SettingsWindow({
   installedFonts = [],
   dictionaryStatus,
   externalDictionaries,
+  agentConnections,
   aiKeyConfigured,
   ocrAvailable,
   onAiKeyConfiguredChange,
@@ -150,9 +158,15 @@ export function SettingsWindow({
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState("");
+  const [apiEditorOpen, setApiEditorOpen] = useState(false);
+  const [apiTestStatus, setApiTestStatus] = useState("");
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [probeReport, setProbeReport] = useState<WordProbeReport | null>(null);
+  const [liveAgentConnections, setLiveAgentConnections] =
+    useState<AgentConnectionStatus[]>(agentConnections);
+  const [agentDetectionLoading, setAgentDetectionLoading] = useState(false);
   const fontOptions = useMemo(
     () =>
       Array.from(
@@ -163,9 +177,45 @@ export function SettingsWindow({
       ).sort((a, b) => a.localeCompare(b, "zh-CN")),
     [installedFonts],
   );
+  const roleModelOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            ...modelOptions,
+            settings.aiModel,
+            settings.aiRoles.chat.model,
+            settings.aiRoles.translation.model,
+            settings.aiRoles.image.model,
+          ].filter(Boolean),
+        ),
+      ),
+    [modelOptions, settings.aiModel, settings.aiRoles],
+  );
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onSettingsChange({ ...settings, [key]: value });
+
+  function updateRole(
+    role: keyof AiRoles,
+    patch: Partial<AiRoles[keyof AiRoles]>,
+  ) {
+    const nextRoles = {
+      ...settings.aiRoles,
+      [role]: { ...settings.aiRoles[role], ...patch },
+    };
+    onSettingsChange({
+      ...settings,
+      aiRoles: nextRoles,
+      ...(role === "translation" && patch.model !== undefined
+        ? { aiModel: patch.model }
+        : {}),
+    });
+  }
+
+  useEffect(() => {
+    setLiveAgentConnections(agentConnections);
+  }, [agentConnections]);
 
   useEffect(() => {
     if (section !== "history") return;
@@ -182,6 +232,26 @@ export function SettingsWindow({
       active = false;
     };
   }, [historyQuery, section]);
+
+  useEffect(() => {
+    if (section !== "diagnostics") return;
+    let active = true;
+    getCaptureDiagnostics().then((report) => {
+      if (active) setProbeReport(report);
+    });
+    return () => {
+      active = false;
+    };
+  }, [section]);
+
+  useEffect(() => {
+    if (!apiEditorOpen) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setApiEditorOpen(false);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [apiEditorOpen]);
 
   async function saveAiCredential() {
     setKeyError("");
@@ -227,6 +297,12 @@ export function SettingsWindow({
       ...settings,
       aiBaseUrl: preset.baseUrl,
       aiProtocol: preset.protocol,
+      aiModel: "",
+      aiRoles: {
+        chat: { ...settings.aiRoles.chat, model: "" },
+        translation: { ...settings.aiRoles.translation, model: "" },
+        image: { ...settings.aiRoles.image, model: "" },
+      },
     });
   }
 
@@ -236,13 +312,35 @@ export function SettingsWindow({
     try {
       const models = await listAiModels(settings, aiKey);
       setModelOptions(models);
-      if (!settings.aiModel && models.length > 0) {
-        update("aiModel", models[0]);
+      if (models.length > 0) {
+        const fallback = models[0];
+        const nextRoles = { ...settings.aiRoles };
+        for (const role of ["chat", "translation", "image"] as const) {
+          if (!nextRoles[role].model) {
+            nextRoles[role] = { ...nextRoles[role], model: fallback };
+          }
+        }
+        onSettingsChange({
+          ...settings,
+          aiModel: nextRoles.translation.model,
+          aiRoles: nextRoles,
+        });
       }
+      setApiTestStatus(`连接成功，读取到 ${models.length} 个模型`);
     } catch (error) {
       setModelError(String(error));
+      setApiTestStatus("连接失败");
     } finally {
       setModelLoading(false);
+    }
+  }
+
+  async function refreshAgentStatus() {
+    setAgentDetectionLoading(true);
+    try {
+      setLiveAgentConnections(await detectAgentConnections());
+    } finally {
+      setAgentDetectionLoading(false);
     }
   }
 
@@ -339,7 +437,7 @@ export function SettingsWindow({
         <div className="sidebar-footer">
           <span className="status-dot" />
           划词已开启
-          <kbd>Alt Shift E</kbd>
+          <kbd>Ctrl Alt E</kbd>
         </div>
       </aside>
 
@@ -381,6 +479,25 @@ export function SettingsWindow({
                 <span className="range-labels">
                   <span>灵敏 150ms</span>
                   <span>稳定 500ms</span>
+                </span>
+              </label>
+              <label className="range-field range-field-secondary">
+                <span>移开后保留时间</span>
+                <input
+                  aria-label="移开后保留时间"
+                  max="5000"
+                  min="500"
+                  onChange={(event) =>
+                    update("wordCardLingerMs", Number(event.target.value))
+                  }
+                  step="100"
+                  type="range"
+                  value={settings.wordCardLingerMs}
+                />
+                <span className="range-labels">
+                  <span>快速 500ms</span>
+                  <span>当前 {settings.wordCardLingerMs}ms</span>
+                  <span>持久 5000ms</span>
                 </span>
               </label>
               <button
@@ -559,143 +676,142 @@ export function SettingsWindow({
         )}
         {section === "ai" && (
           <div className="settings-stack">
-            <section className="settings-section">
+            <section className="settings-section agent-settings-section">
               <div className="section-title">
                 <div>
-                  <h2>AI 服务</h2>
-                  <p>键值仅保存到 Windows 凭据管理器，不写入配置文件。</p>
+                  <h2>Agent 连接</h2>
+                  <p>选择 Eneye 可使用的 AI 服务。</p>
                 </div>
-                <span
-                  className={`status-pill ${
-                    aiKeyConfigured ? "is-ok" : "is-neutral"
-                  }`}
-                >
-                  {aiKeyConfigured ? "已配置密钥" : "未配置"}
-                </span>
-              </div>
-              <div className="provider-presets" aria-label="常用 AI 服务">
                 <button
-                  onClick={() => applyProviderPreset("deepseek")}
+                  aria-label="刷新连接状态"
+                  className="icon-button agent-refresh"
+                  disabled={agentDetectionLoading}
+                  onClick={() => void refreshAgentStatus()}
                   type="button"
                 >
-                  DeepSeek
-                </button>
-                <button
-                  onClick={() => applyProviderPreset("openai")}
-                  type="button"
-                >
-                  OpenAI
-                </button>
-                <button
-                  onClick={() => applyProviderPreset("anthropic")}
-                  type="button"
-                >
-                  Anthropic
+                  <Icon name="pulse" />
                 </button>
               </div>
-              <label className="stacked-field">
-                <span className="field-label">接口协议</span>
-                <select
-                  aria-label="AI 接口协议"
-                  onChange={(event) =>
-                    update(
-                      "aiProtocol",
-                      event.target.value as AppSettings["aiProtocol"],
-                    )
-                  }
-                  value={settings.aiProtocol}
+              <div className="agent-connection-grid">
+                {(
+                  [
+                    ["codex", "Codex", "C", ""],
+                    ["claude-code", "Claude Code", "C", "is-claude"],
+                    ["kimi-code", "Kimi Code", "K", "is-kimi"],
+                  ] as const
+                ).map(([id, name, logo, logoClass]) => {
+                  const status = liveAgentConnections.find(
+                    (connection) => connection.id === id,
+                  );
+                  return (
+                    <article
+                      className={`agent-connection-card ${
+                        status?.available ? "is-available" : "is-unavailable"
+                      }`}
+                      key={id}
+                    >
+                      <span className={`agent-logo ${logoClass}`}>{logo}</span>
+                      <div>
+                        <strong>{name}</strong>
+                        <span>
+                          {status?.detail ??
+                            (agentDetectionLoading ? "正在检测…" : "尚未检测")}
+                        </span>
+                      </div>
+                      <span
+                        className={`agent-state ${
+                          status?.available ? "is-ok" : ""
+                        }`}
+                      >
+                        {status?.available ? "已检测" : "未检测到"}
+                      </span>
+                    </article>
+                  );
+                })}
+                <button
+                  className="agent-connection-card is-api"
+                  onClick={() => setApiEditorOpen(true)}
+                  type="button"
                 >
-                  <option value="auto">自动判断</option>
-                  <option value="openai">OpenAI Chat Completions</option>
-                  <option value="anthropic">Anthropic Messages</option>
-                </select>
-              </label>
-              <label className="stacked-field">
-                <span className="field-label">Base URL</span>
-                <input
-                  aria-label="AI Base URL"
-                  onChange={(event) => update("aiBaseUrl", event.target.value)}
-                  spellCheck={false}
-                  type="url"
-                  value={settings.aiBaseUrl}
-                />
-              </label>
-              <label className="stacked-field">
-                <span className="field-label">模型</span>
-                <div className="model-row">
-                  <input
-                    aria-label="AI 模型名称"
-                    list="eneye-model-options"
-                    onChange={(event) => update("aiModel", event.target.value)}
-                    placeholder="填写或从服务商读取模型 ID"
-                    spellCheck={false}
-                    type="text"
-                    value={settings.aiModel}
-                  />
-                  <datalist id="eneye-model-options">
-                    {modelOptions.map((model) => (
-                      <option key={model} value={model} />
-                    ))}
-                  </datalist>
-                  <button
-                    className="secondary-button"
-                    disabled={modelLoading}
-                    onClick={refreshModelOptions}
-                    type="button"
-                  >
-                    {modelLoading ? "读取中…" : "读取模型"}
-                  </button>
-                </div>
-                {modelError && (
-                  <span className="field-error" role="alert">
-                    {modelError}
-                  </span>
-                )}
-              </label>
-              <label className="stacked-field">
-                <span className="field-label">API Key</span>
-                <div className="credential-row">
-                  <input
-                    aria-label="API Key"
-                    autoComplete="off"
-                    onChange={(event) => setAiKeyValue(event.target.value)}
-                    placeholder={
-                      aiKeyConfigured
-                        ? "密钥已安全保存，输入新值可替换"
-                        : "输入 API Key"
-                    }
-                    type="password"
-                    value={aiKey}
-                  />
-                  <button
-                    className="primary-button"
-                    disabled={!aiKey.trim() || keyStatus === "saving"}
-                    onClick={saveAiCredential}
-                    type="button"
-                  >
-                    {keyStatus === "saving"
-                      ? "保存中…"
-                      : keyStatus === "saved"
-                        ? "已保存"
-                        : "保存密钥"}
-                  </button>
-                </div>
-                {keyError && (
-                  <span className="field-error" role="alert">
-                    {keyError}
-                  </span>
-                )}
-                {aiKeyConfigured && (
-                  <button
-                    className="text-button danger-text"
-                    onClick={removeAiCredential}
-                    type="button"
-                  >
-                    删除已保存的密钥
-                  </button>
-                )}
-              </label>
+                  <span className="agent-logo is-api">⌁</span>
+                  <div>
+                    <strong>{settings.aiConnectionName || "API"}</strong>
+                    <span className="agent-capabilities">
+                      <small className={aiKeyConfigured ? "is-ok" : ""}>
+                        ✓ 文本推理
+                      </small>
+                      <small className="is-muted">图片理解（本版未使用）</small>
+                    </span>
+                  </div>
+                  <Icon name="chevron" size={17} />
+                </button>
+              </div>
             </section>
+
+            <section className="settings-section agent-models-section">
+              <div className="section-title">
+                <div>
+                  <h2>模型与推理</h2>
+                  <p>Eneye 当前使用“翻译”角色。</p>
+                </div>
+                <button
+                  className="text-button"
+                  disabled={modelLoading}
+                  onClick={refreshModelOptions}
+                  type="button"
+                >
+                  {modelLoading ? "读取中…" : "刷新模型"}
+                </button>
+              </div>
+              {(["chat", "translation", "image"] as const).map((role) => {
+                const roleLabels = {
+                  chat: "问答",
+                  translation: "翻译",
+                  image: "图片",
+                };
+                return (
+                  <div className="agent-role-row" key={role}>
+                    <strong>{roleLabels[role]}</strong>
+                    <select
+                      aria-label={`${roleLabels[role]}模型`}
+                      onChange={(event) =>
+                        updateRole(role, { model: event.target.value })
+                      }
+                      value={settings.aiRoles[role].model}
+                    >
+                      <option value="">选择模型</option>
+                      {roleModelOptions.map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      aria-label={`${roleLabels[role]}推理强度`}
+                      onChange={(event) =>
+                        updateRole(role, {
+                          effort: event.target.value as AiEffort,
+                        })
+                      }
+                      value={settings.aiRoles[role].effort}
+                    >
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+                );
+              })}
+              <p className="agent-rule-note">
+                按官方模型规则发送。medium → high
+              </p>
+              {modelError && (
+                <span className="field-error" role="alert">
+                  {modelError}
+                </span>
+              )}
+            </section>
+
             <section className="settings-section">
               <div className="section-title">
                 <div>
@@ -741,6 +857,174 @@ export function SettingsWindow({
                 AI 只接收拖选中的文字，不读取周围段落、截图或其他窗口内容。
               </p>
             </section>
+
+            {apiEditorOpen && (
+              <div
+                className="modal-backdrop"
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget) {
+                    setApiEditorOpen(false);
+                  }
+                }}
+              >
+                <section
+                  aria-label="API 设置"
+                  aria-modal="true"
+                  className="api-editor"
+                  role="dialog"
+                >
+                  <header className="api-editor-header">
+                    <div>
+                      <p className="eyebrow">API CONNECTION</p>
+                      <h2>编辑 API</h2>
+                    </div>
+                    <button
+                      aria-label="关闭 API 设置"
+                      className="icon-button"
+                      onClick={() => setApiEditorOpen(false)}
+                      type="button"
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </header>
+                  <div className="api-editor-body">
+                    <div className="provider-presets" aria-label="常用 AI 服务">
+                      <button
+                        onClick={() => applyProviderPreset("deepseek")}
+                        type="button"
+                      >
+                        DeepSeek
+                      </button>
+                      <button
+                        onClick={() => applyProviderPreset("openai")}
+                        type="button"
+                      >
+                        OpenAI
+                      </button>
+                      <button
+                        onClick={() => applyProviderPreset("anthropic")}
+                        type="button"
+                      >
+                        Anthropic
+                      </button>
+                    </div>
+                    <label className="stacked-field">
+                      <span className="field-label">连接名称</span>
+                      <input
+                        aria-label="AI 连接名称"
+                        onChange={(event) =>
+                          update("aiConnectionName", event.target.value)
+                        }
+                        type="text"
+                        value={settings.aiConnectionName}
+                      />
+                    </label>
+                    <label className="stacked-field">
+                      <span className="field-label">接口协议</span>
+                      <select
+                        aria-label="AI 接口协议"
+                        onChange={(event) =>
+                          update(
+                            "aiProtocol",
+                            event.target.value as AppSettings["aiProtocol"],
+                          )
+                        }
+                        value={settings.aiProtocol}
+                      >
+                        <option value="auto">自动判断</option>
+                        <option value="openai">OpenAI Chat Completions</option>
+                        <option value="anthropic">Anthropic Messages</option>
+                      </select>
+                    </label>
+                    <label className="stacked-field">
+                      <span className="field-label">API 地址</span>
+                      <input
+                        aria-label="AI Base URL"
+                        onChange={(event) =>
+                          update("aiBaseUrl", event.target.value)
+                        }
+                        spellCheck={false}
+                        type="url"
+                        value={settings.aiBaseUrl}
+                      />
+                    </label>
+                    <label className="stacked-field">
+                      <span className="field-label">API Key</span>
+                      <div className="credential-row">
+                        <input
+                          aria-label="API Key"
+                          autoComplete="off"
+                          onChange={(event) =>
+                            setAiKeyValue(event.target.value)
+                          }
+                          placeholder={
+                            aiKeyConfigured
+                              ? "密钥已安全保存，输入新值可替换"
+                              : "输入 API Key"
+                          }
+                          type="password"
+                          value={aiKey}
+                        />
+                        <button
+                          className="primary-button"
+                          disabled={!aiKey.trim() || keyStatus === "saving"}
+                          onClick={saveAiCredential}
+                          type="button"
+                        >
+                          {keyStatus === "saving"
+                            ? "保存中…"
+                            : keyStatus === "saved"
+                              ? "已保存"
+                              : "保存密钥"}
+                        </button>
+                      </div>
+                      {keyError && (
+                        <span className="field-error" role="alert">
+                          {keyError}
+                        </span>
+                      )}
+                      {aiKeyConfigured && (
+                        <button
+                          className="text-button danger-text"
+                          onClick={removeAiCredential}
+                          type="button"
+                        >
+                          删除已保存的密钥
+                        </button>
+                      )}
+                    </label>
+                    {apiTestStatus && (
+                      <p
+                        className={
+                          apiTestStatus === "连接失败"
+                            ? "api-test-status is-error"
+                            : "api-test-status"
+                        }
+                      >
+                        {apiTestStatus}
+                      </p>
+                    )}
+                  </div>
+                  <footer className="api-editor-footer">
+                    <button
+                      className="secondary-button"
+                      disabled={modelLoading}
+                      onClick={refreshModelOptions}
+                      type="button"
+                    >
+                      {modelLoading ? "测试中…" : "测试连接并读取模型"}
+                    </button>
+                    <button
+                      className="primary-button"
+                      onClick={() => setApiEditorOpen(false)}
+                      type="button"
+                    >
+                      完成
+                    </button>
+                  </footer>
+                </section>
+              </div>
+            )}
           </div>
         )}
         {section === "history" && (
@@ -833,7 +1117,7 @@ export function SettingsWindow({
               <DiagnosticRow
                 detail={
                   ocrAvailable
-                    ? "Windows 英文 OCR 已启用"
+                    ? "Windows 本地 OCR 已启用（优先英文，缺失时使用已安装语言）"
                     : "请在 Windows 语言设置中安装英文 OCR 可选功能"
                 }
                 label="本地 OCR"
@@ -853,6 +1137,40 @@ export function SettingsWindow({
                 label="系统接口"
                 ok
               />
+              <div className="probe-report">
+                <div className="probe-report-heading">
+                  <div>
+                    <strong>最近一次取词探针</strong>
+                    <span>
+                      {probeReport?.word
+                        ? `命中 ${probeReport.word} · ${probeReport.source}`
+                        : "尚未命中单词"}
+                      {probeReport ? ` · ${probeReport.totalMs}ms` : ""}
+                    </span>
+                  </div>
+                  <button
+                    className="text-button"
+                    onClick={() =>
+                      void getCaptureDiagnostics().then(setProbeReport)
+                    }
+                    type="button"
+                  >
+                    刷新
+                  </button>
+                </div>
+                {(probeReport?.stages ?? []).map((stage) => (
+                  <div className="probe-stage" key={stage.provider}>
+                    <span
+                      className={`status-dot ${
+                        stage.available ? "is-ok" : "is-neutral"
+                      }`}
+                    />
+                    <strong>{stage.provider.toUpperCase()}</strong>
+                    <span>{stage.detail}</span>
+                    <time>{stage.durationMs}ms</time>
+                  </div>
+                ))}
+              </div>
             </section>
           </div>
         )}

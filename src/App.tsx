@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS, FONT_OPTIONS } from "./data/sample";
 import { loadBootstrap, saveSettings } from "./lib/api";
 import { getWindowKind, isTauriRuntime } from "./lib/tauri";
 import type {
+  AgentConnectionStatus,
   AppSettings,
   BootstrapData,
   DictionaryStatus,
@@ -28,6 +29,9 @@ export default function App() {
   const [externalDictionaries, setExternalDictionaries] = useState<
     ExternalDictionary[]
   >([]);
+  const [agentConnections, setAgentConnections] = useState<
+    AgentConnectionStatus[]
+  >([]);
   const [loaded, setLoaded] = useState(false);
   const saveTimer = useRef<number | undefined>(undefined);
   const readyToSave = useRef(false);
@@ -49,6 +53,7 @@ export default function App() {
         setFonts(bootstrap.fonts);
         setDictionaryStatus(bootstrap.dictionaryStatus);
         setExternalDictionaries(bootstrap.externalDictionaries);
+        setAgentConnections(bootstrap.agentConnections);
         setAiKeyConfigured(bootstrap.aiKeyConfigured);
         setOcrAvailable(bootstrap.ocrAvailable);
         readyToSave.current = true;
@@ -85,6 +90,7 @@ export default function App() {
   return (
     <>
       <SettingsWindow
+        agentConnections={agentConnections}
         aiKeyConfigured={aiKeyConfigured}
         dictionaryStatus={dictionaryStatus}
         externalDictionaries={externalDictionaries}
