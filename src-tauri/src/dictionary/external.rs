@@ -115,7 +115,7 @@ impl LoadedExternalDictionary {
 
     pub fn lookup(&self, word: &str) -> Vec<DictionaryEntry> {
         let mut seen = std::collections::HashSet::new();
-        self.lookup_with_redirects(word, 0)
+        self.lookup_with_redirects(word, 0, word)
             .into_iter()
             .filter(|entry| {
                 let key = entry
@@ -127,18 +127,23 @@ impl LoadedExternalDictionary {
             .collect()
     }
 
-    fn lookup_with_redirects(&self, word: &str, depth: u8) -> Vec<DictionaryEntry> {
+    fn lookup_with_redirects(
+        &self,
+        word: &str,
+        depth: u8,
+        requested: &str,
+    ) -> Vec<DictionaryEntry> {
         let Some(reader) = &self.reader else {
             return Vec::new();
         };
         match reader {
             Reader::OpenDict(dictionary) => {
                 let entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
-                self.resolve_entries(entries, depth)
+                self.resolve_entries(entries, depth, requested)
             }
             Reader::Mdict(dictionary) => {
                 let entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
-                self.resolve_entries(entries, depth)
+                self.resolve_entries(entries, depth, requested)
             }
             Reader::Csv(csv) => csv
                 .entries
@@ -163,20 +168,30 @@ impl LoadedExternalDictionary {
         }
     }
 
-    fn resolve_entries(&self, entries: Vec<DictEntry>, depth: u8) -> Vec<DictionaryEntry> {
+    fn resolve_entries(
+        &self,
+        entries: Vec<DictEntry>,
+        depth: u8,
+        requested: &str,
+    ) -> Vec<DictionaryEntry> {
         const MAX_REDIRECT_DEPTH: u8 = 4;
         let mut resolved = Vec::new();
         for entry in entries {
             if depth < MAX_REDIRECT_DEPTH
                 && let Some(target) = redirect_target(&entry.data)
             {
-                let followed = self.lookup_with_redirects(&target, depth + 1);
+                let mut followed = self.lookup_with_redirects(&target, depth + 1, requested);
                 if !followed.is_empty() {
+                    for item in &mut followed {
+                        item.priority = item.priority.saturating_add(1000);
+                        item.dictionary_name =
+                            format!("{}（{} 原形）", item.dictionary_name, target);
+                    }
                     resolved.extend(followed);
                     continue;
                 }
             }
-            resolved.push(from_open_dict_entry(&self.metadata, entry));
+            resolved.push(from_open_dict_entry(&self.metadata, entry, requested));
         }
         resolved
     }
@@ -242,7 +257,7 @@ fn redirect_target(data: &[u8]) -> Option<String> {
     (!target.is_empty() && target.chars().count() <= 200).then(|| target.to_owned())
 }
 
-fn extract_phonetic(html: &str) -> Option<String> {
+fn phonetics_in(html: &str) -> Vec<String> {
     let mut rest = html;
     let mut values: Vec<String> = Vec::new();
     while let Some(position) = rest.find("class=\"phon\"") {
@@ -259,10 +274,37 @@ fn extract_phonetic(html: &str) -> Option<String> {
             values.push(value);
         }
         rest = &body[close + 7..];
-        if values.len() >= 2 {
-            break;
-        }
     }
+    values
+}
+
+fn accent_block<'a>(html: &'a str, class_name: &str) -> Option<&'a str> {
+    let marker = format!("class=\"{class_name}\"");
+    let marker_position = html.find(&marker)?;
+    let body_start = html[marker_position..].find('>')? + marker_position + 1;
+    let body = &html[body_start..];
+    let body_end = body.find("</div>")?;
+    Some(&html[body_start..body_start + body_end])
+}
+
+fn extract_phonetic(html: &str) -> Option<String> {
+    let british = accent_block(html, "phons_br")
+        .map(phonetics_in)
+        .unwrap_or_default();
+    let american = accent_block(html, "phons_n_am")
+        .map(phonetics_in)
+        .unwrap_or_default();
+    let mut lines = Vec::new();
+    if !british.is_empty() {
+        lines.push(format!("英音 {}", british.join("  ")));
+    }
+    if !american.is_empty() {
+        lines.push(format!("美音 {}", american.join("  ")));
+    }
+    if !lines.is_empty() {
+        return Some(lines.join("\n"));
+    }
+    let values = phonetics_in(html);
     (!values.is_empty()).then(|| values.join("\n"))
 }
 
@@ -287,9 +329,77 @@ fn clean_inline_html(html: &str) -> String {
         .join(" ")
 }
 
-fn from_open_dict_entry(metadata: &ExternalDictionary, entry: DictEntry) -> DictionaryEntry {
-    let raw = String::from_utf8_lossy(&entry.data).into_owned();
+fn extract_headword(html: &str) -> Option<String> {
+    let marker = "class=\"headword\"";
+    let position = html.find(marker)?;
+    let after = &html[position..];
+    let tag_end = after.find('>')?;
+    let body = &after[tag_end + 1..];
+    let close = body.find("</h1>")?;
+    let headword = clean_inline_html(&body[..close]);
+    (!headword.is_empty()).then_some(headword)
+}
+
+fn select_entry_html(html: &str, requested: &str) -> Option<String> {
+    let target = requested.trim().to_lowercase();
+    if target.is_empty() {
+        return None;
+    }
+    let marker = "<div class=\"entry\"";
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    while let Some(position) = html[offset..].find(marker) {
+        let absolute = offset + position;
+        starts.push(absolute);
+        offset = absolute + marker.len();
+    }
+    let mut selected = String::new();
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(html.len());
+        let segment = &html[*start..end];
+        if extract_headword(segment).is_some_and(|headword| headword.to_lowercase() == target) {
+            selected.push_str(segment);
+        }
+    }
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn extract_form_phonetic(html: &str, requested: &str) -> Option<String> {
+    let target = requested.trim().to_lowercase();
+    if target.is_empty() {
+        return None;
+    }
+    let mut rest = html;
+    while let Some(position) = rest.find("<tr") {
+        let after = &rest[position..];
+        let Some(end) = after.find("</tr>") else {
+            break;
+        };
+        let row = &after[..end + 5];
+        let words = html_to_lines(row).join(" ").to_lowercase();
+        let matches = words
+            .split(|character: char| {
+                !character.is_alphabetic() && character != '\'' && character != '-'
+            })
+            .any(|word| word == target);
+        if matches && let Some(phonetic) = extract_phonetic(row) {
+            return Some(phonetic);
+        }
+        rest = &after[end + 5..];
+    }
+    None
+}
+
+fn from_open_dict_entry(
+    metadata: &ExternalDictionary,
+    entry: DictEntry,
+    requested: &str,
+) -> DictionaryEntry {
+    let mut raw = String::from_utf8_lossy(&entry.data).into_owned();
     let is_html = matches!(entry.type_id, 'h' | 'x') || raw.contains('<');
+    if is_html && let Some(selected) = select_entry_html(&raw, requested) {
+        raw = selected;
+    }
     let definitions = if is_html {
         html_to_lines(&raw)
     } else {
@@ -305,7 +415,7 @@ fn from_open_dict_entry(metadata: &ExternalDictionary, entry: DictEntry) -> Dict
         dictionary_name: metadata.name.clone(),
         priority: metadata.priority,
         phonetic: if is_html {
-            extract_phonetic(&raw)
+            extract_form_phonetic(&raw, requested).or_else(|| extract_phonetic(&raw))
         } else {
             None
         },
@@ -453,6 +563,34 @@ mod tests {
         let html = r#"<span class="phon">/meɪk/</span><span class="phon">/meɪk/</span><span class="phon">/sɑːlvd/</span>"#;
         assert_eq!(extract_phonetic(html).as_deref(), Some("/meɪk/\n/sɑːlvd/"));
         assert_eq!(extract_phonetic("<span>no phonetic</span>"), None);
+    }
+
+    #[test]
+    fn extracts_british_and_american_phonetics() {
+        let html = r#"<span class="phonetics"><div class="phons_br"><span class="phon">/ˈhelpə(r)/</span></div><div class="phons_n_am"><span class="phon">/ˈhelpər/</span></div></span>"#;
+        assert_eq!(
+            extract_phonetic(html).as_deref(),
+            Some("英音 /ˈhelpə(r)/\n美音 /ˈhelpər/")
+        );
+    }
+
+    #[test]
+    fn selects_the_requested_headword_from_a_bundled_page() {
+        let html = r#"<html><body><div class="entry" id="would_1"><h1 class="headword">would</h1><span class="phon">/wʊd/</span></div><div class="entry" id="will_1"><h1 class="headword">will</h1><span class="phon">/wɪl/</span></div></body></html>"#;
+        let selected = select_entry_html(html, "would").unwrap();
+        assert!(selected.contains("would_1"));
+        assert!(!selected.contains("will_1"));
+        assert_eq!(extract_phonetic(&selected).as_deref(), Some("/wʊd/"));
+    }
+
+    #[test]
+    fn extracts_the_inflected_form_phonetic() {
+        let html = r#"<table><tr class="verb_form" form="past"><td><span class="vf_prefix">past simple</span> went</td><td><span class="phon">/went/</span></td></tr></table>"#;
+        assert_eq!(
+            extract_form_phonetic(html, "went").as_deref(),
+            Some("/went/")
+        );
+        assert_eq!(extract_form_phonetic(html, "go"), None);
     }
 
     #[test]

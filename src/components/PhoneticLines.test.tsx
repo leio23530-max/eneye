@@ -9,6 +9,17 @@ describe("PhoneticLines", () => {
     expect(screen.getByText("/ɔːˈtɑːnəmi/")).toBeVisible();
   });
 
+  it("keeps accent labels intact", () => {
+    render(<PhoneticLines value={"英音 /ˈhelpə(r)/\n美音 /ˈhelpər/"} />);
+    expect(screen.getByText("英音 /ˈhelpə(r)/")).toBeVisible();
+    expect(screen.getByText("美音 /ˈhelpər/")).toBeVisible();
+  });
+
+  it("wraps bare ECDICT phonetics in slashes", () => {
+    render(<PhoneticLines value="wud" />);
+    expect(screen.getByText("/wud/")).toBeVisible();
+  });
+
   it("renders nothing without a phonetic", () => {
     const { container } = render(<PhoneticLines />);
     expect(container.firstChild).toBeNull();
