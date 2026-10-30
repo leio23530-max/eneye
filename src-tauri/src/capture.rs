@@ -333,6 +333,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             }
             store_probe_report(&app, &report);
             if let Some(result) = result {
+                leave_since = None;
                 show_lookup(&app, result, pointer);
             } else if !keeps_existing_card(&app) {
                 hide_overlay(&app);
