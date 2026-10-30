@@ -114,26 +114,32 @@ impl LoadedExternalDictionary {
     }
 
     pub fn lookup(&self, word: &str) -> Vec<DictionaryEntry> {
+        let mut seen = std::collections::HashSet::new();
+        self.lookup_with_redirects(word, 0)
+            .into_iter()
+            .filter(|entry| {
+                let key = entry
+                    .html
+                    .clone()
+                    .unwrap_or_else(|| entry.definitions.join("\n"));
+                seen.insert((entry.dictionary_id.clone(), key))
+            })
+            .collect()
+    }
+
+    fn lookup_with_redirects(&self, word: &str, depth: u8) -> Vec<DictionaryEntry> {
         let Some(reader) = &self.reader else {
             return Vec::new();
         };
         match reader {
-            Reader::OpenDict(dictionary) => dictionary
-                .lookup(word)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|entry| from_open_dict_entry(&self.metadata, entry))
-                .collect(),
-            Reader::Mdict(dictionary) => dictionary
-                .lookup(word)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|entry| from_open_dict_entry(&self.metadata, entry))
-                .collect(),
+            Reader::OpenDict(dictionary) => {
+                let entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
+                self.resolve_entries(entries, depth)
+            }
+            Reader::Mdict(dictionary) => {
+                let entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
+                self.resolve_entries(entries, depth)
+            }
             Reader::Csv(csv) => csv
                 .entries
                 .get(&normalize(word))
@@ -155,6 +161,24 @@ impl LoadedExternalDictionary {
                 })
                 .unwrap_or_default(),
         }
+    }
+
+    fn resolve_entries(&self, entries: Vec<DictEntry>, depth: u8) -> Vec<DictionaryEntry> {
+        const MAX_REDIRECT_DEPTH: u8 = 4;
+        let mut resolved = Vec::new();
+        for entry in entries {
+            if depth < MAX_REDIRECT_DEPTH
+                && let Some(target) = redirect_target(&entry.data)
+            {
+                let followed = self.lookup_with_redirects(&target, depth + 1);
+                if !followed.is_empty() {
+                    resolved.extend(followed);
+                    continue;
+                }
+            }
+            resolved.push(from_open_dict_entry(&self.metadata, entry));
+        }
+        resolved
     }
 
     pub fn resource(&self, path: &str) -> Option<Vec<u8>> {
@@ -211,6 +235,58 @@ fn dictionary_format(path: &Path) -> Option<&'static str> {
     }
 }
 
+fn redirect_target(data: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(data);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    let target = text.strip_prefix("@@@LINK=")?.lines().next()?.trim();
+    (!target.is_empty() && target.chars().count() <= 200).then(|| target.to_owned())
+}
+
+fn extract_phonetic(html: &str) -> Option<String> {
+    let mut rest = html;
+    let mut values: Vec<String> = Vec::new();
+    while let Some(position) = rest.find("class=\"phon\"") {
+        let after = &rest[position..];
+        let Some(tag_end) = after.find('>') else {
+            break;
+        };
+        let body = &after[tag_end + 1..];
+        let Some(close) = body.find("</span>") else {
+            break;
+        };
+        let value = clean_inline_html(&body[..close]);
+        if !value.is_empty() && !values.contains(&value) {
+            values.push(value);
+        }
+        rest = &body[close + 7..];
+        if values.len() >= 2 {
+            break;
+        }
+    }
+    (!values.is_empty()).then(|| values.join("  "))
+}
+
+fn clean_inline_html(html: &str) -> String {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if in_tag => {}
+            _ => text.push(character),
+        }
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn from_open_dict_entry(metadata: &ExternalDictionary, entry: DictEntry) -> DictionaryEntry {
     let raw = String::from_utf8_lossy(&entry.data).into_owned();
     let is_html = matches!(entry.type_id, 'h' | 'x') || raw.contains('<');
@@ -228,7 +304,11 @@ fn from_open_dict_entry(metadata: &ExternalDictionary, entry: DictEntry) -> Dict
         dictionary_id: metadata.id.clone(),
         dictionary_name: metadata.name.clone(),
         priority: metadata.priority,
-        phonetic: None,
+        phonetic: if is_html {
+            extract_phonetic(&raw)
+        } else {
+            None
+        },
         part_of_speech: None,
         definitions,
         inflections: None,
@@ -366,6 +446,24 @@ mod tests {
             .unwrap();
         let loaded = LoadedExternalDictionary::open(ecdict);
         assert_eq!(loaded.lookup("read")[0].phonetic.as_deref(), Some("/red/"));
+    }
+
+    #[test]
+    fn extracts_phonetics_from_html_entries() {
+        let html = r#"<span class="phon">/meɪk/</span><span class="phon">/meɪk/</span><span class="phon">/sɑːlvd/</span>"#;
+        assert_eq!(extract_phonetic(html).as_deref(), Some("/meɪk/  /sɑːlvd/"));
+        assert_eq!(extract_phonetic("<span>no phonetic</span>"), None);
+    }
+
+    #[test]
+    fn recognizes_mdx_redirect_entries() {
+        assert_eq!(redirect_target(b"@@@LINK=sense\r\n"), Some("sense".into()));
+        assert_eq!(
+            redirect_target("\u{feff}@@@LINK=run".as_bytes()),
+            Some("run".into())
+        );
+        assert_eq!(redirect_target(b"<html><body>entry</body></html>"), None);
+        assert_eq!(redirect_target(b"@@@LINK=   \n"), None);
     }
 
     #[test]
