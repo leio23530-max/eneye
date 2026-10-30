@@ -133,10 +133,6 @@ export interface SelectionPayload {
   targetLanguage: string;
 }
 
-export interface LookupLoadingPayload {
-  source: RecognitionSource;
-}
-
 export interface ProbeStage {
   provider: string;
   available: boolean;

@@ -10,7 +10,6 @@ import { isTauriRuntime } from "../lib/tauri";
 import { SAMPLE_LOOKUP } from "../data/sample";
 import type {
   AppSettings,
-  LookupLoadingPayload,
   LookupResult,
   SelectionPayload,
   TranslationState,
@@ -28,7 +27,6 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
   const [lookup, setLookup] = useState<LookupResult | null>(
     preview ? SAMPLE_LOOKUP : null,
   );
-  const [loading, setLoading] = useState<LookupLoadingPayload | null>(null);
   const [translation, setTranslation] = useState<TranslationState | null>(null);
   const [pinned, setPinned] = useState(false);
   const currentRequest = useRef("");
@@ -37,18 +35,11 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     if (!isTauriRuntime()) return;
     const cleanups = Promise.all([
       listen<LookupResult>("eneye://lookup", (event) => {
-        setLoading(null);
         setTranslation(null);
         setLookup(event.payload);
       }),
-      listen<LookupLoadingPayload>("eneye://lookup-loading", (event) => {
-        setLookup(null);
-        setTranslation(null);
-        setLoading(event.payload);
-      }),
       listen<SelectionPayload>("eneye://selection", (event) => {
         currentRequest.current = event.payload.requestId;
-        setLoading(null);
         setLookup(null);
         setTranslation({
           requestId: event.payload.requestId,
@@ -174,17 +165,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     );
   }
 
-  return (
-    <main className="overlay-stage">
-      <article className="dictionary-card loading-card" aria-live="polite">
-        <span className="loading-orbit" aria-hidden="true" />
-        <strong>正在识别屏幕文字</strong>
-        <span>
-          {loading?.source === "ocr" ? "本机 OCR 处理中…" : "读取选区中…"}
-        </span>
-      </article>
-    </main>
-  );
+  return <main className="overlay-stage" />;
 }
 
 export function TranslationOverlayCard({

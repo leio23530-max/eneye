@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../data/sample";
 import type { AppSettings } from "../types";
 import { SettingsWindow } from "./SettingsWindow";
@@ -48,7 +48,48 @@ function Harness() {
   );
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("SettingsWindow", () => {
+  it("uses both capture-feel sliders in the hover preview", () => {
+    vi.useFakeTimers();
+    render(<Harness />);
+
+    fireEvent.change(screen.getByRole("slider", { name: "悬浮停留时间" }), {
+      target: { value: "200" },
+    });
+    fireEvent.change(screen.getByRole("slider", { name: "移开后保留时间" }), {
+      target: { value: "2200" },
+    });
+
+    const preview = screen.getByRole("button", { name: /A quiet place/ });
+    fireEvent.mouseEnter(preview);
+    act(() => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(
+      screen.queryByText("意外发现美好事物的运气"),
+    ).not.toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("意外发现美好事物的运气")).toBeVisible();
+
+    fireEvent.mouseLeave(preview);
+    act(() => {
+      vi.advanceTimersByTime(2199);
+    });
+    expect(screen.getByText("意外发现美好事物的运气")).toBeVisible();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(
+      screen.queryByText("意外发现美好事物的运气"),
+    ).not.toBeInTheDocument();
+  });
+
   it("adjusts hover delay and persists the selected value", async () => {
     const user = userEvent.setup();
     render(<Harness />);

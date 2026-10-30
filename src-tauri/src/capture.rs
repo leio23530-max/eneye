@@ -61,12 +61,6 @@ pub struct SelectionPayload {
     pub target_language: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct LookupLoadingPayload {
-    source: String,
-}
-
 pub fn start(app: tauri::AppHandle) {
     let (sender, receiver) = mpsc::channel();
     EVENT_SENDER.set(sender).ok();
@@ -286,15 +280,18 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                             "系统没有可用的 OCR 语言包".into(),
                         );
                         store_probe_report(&app, &report);
-                        hide_overlay(&app);
+                        if !keeps_existing_card(&app) {
+                            hide_overlay(&app);
+                        }
                         continue;
                     }
-                    show_loading(&app, "ocr", (x, y));
                     let ocr_started = Instant::now();
                     match ocr_word_at(x, y) {
                         Ok(Some(word)) => {
                             if !cursor_still_matches(pointer) {
-                                hide_overlay(&app);
+                                if !keeps_existing_card(&app) {
+                                    hide_overlay(&app);
+                                }
                                 continue;
                             }
                             word_probe::update_ocr_stage(
@@ -329,13 +326,15 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                 }
             };
             if !cursor_still_matches(pointer) {
-                hide_overlay(&app);
+                if !keeps_existing_card(&app) {
+                    hide_overlay(&app);
+                }
                 continue;
             }
             store_probe_report(&app, &report);
             if let Some(result) = result {
                 show_lookup(&app, result, pointer);
-            } else {
+            } else if !keeps_existing_card(&app) {
                 hide_overlay(&app);
             }
             preflight = None;
@@ -410,19 +409,6 @@ fn overlay_pinned(app: &tauri::AppHandle) -> bool {
         .load(Ordering::Relaxed)
 }
 
-fn show_loading(app: &tauri::AppHandle, source: &str, point: (i32, i32)) {
-    set_overlay_state(app, OverlayMode::Word, Some(point));
-    if let Some(window) = app.get_webview_window("overlay") {
-        let _ = window.emit(
-            "eneye://lookup-loading",
-            LookupLoadingPayload {
-                source: source.into(),
-            },
-        );
-        let _ = position_and_show_overlay(app);
-    }
-}
-
 fn show_lookup(app: &tauri::AppHandle, lookup: crate::models::LookupResult, point: (i32, i32)) {
     set_overlay_state(app, OverlayMode::Word, Some(point));
     if let Some(window) = app.get_webview_window("overlay") {
@@ -454,6 +440,18 @@ fn show_selection(app: &tauri::AppHandle, payload: SelectionPayload, point: (i32
     });
 }
 
+fn keeps_existing_card(app: &tauri::AppHandle) -> bool {
+    keeps_card(
+        overlay_mode(app),
+        overlay_is_visible(app),
+        overlay_pinned(app),
+    )
+}
+
+fn keeps_card(mode: OverlayMode, visible: bool, pinned: bool) -> bool {
+    visible && !pinned && matches!(mode, OverlayMode::Word | OverlayMode::Translation)
+}
+
 fn hide_overlay(app: &tauri::AppHandle) {
     let can_hide = !overlay_pinned(app) || overlay_mode(app) == OverlayMode::Translation;
     if let Some(window) = app.get_webview_window("overlay")
@@ -473,21 +471,6 @@ pub(crate) fn mark_overlay_hidden() {
 
 fn captures_escape(mode: OverlayMode) -> bool {
     mode == OverlayMode::Translation
-}
-
-fn position_and_show_overlay(app: &tauri::AppHandle) -> bool {
-    #[cfg(windows)]
-    {
-        let mut point = windows::Win32::Foundation::POINT::default();
-        if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) }.is_ok() {
-            position_overlay(app, (point.x, point.y));
-            if let Some(window) = app.get_webview_window("overlay") {
-                let _ = window.show();
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
@@ -1034,6 +1017,15 @@ mod tests {
             (400, 400),
             Some((100, 100)),
         ));
+    }
+
+    #[test]
+    fn empty_lookup_keeps_a_visible_card_until_the_linger_timer() {
+        assert!(keeps_card(OverlayMode::Word, true, false));
+        assert!(keeps_card(OverlayMode::Translation, true, false));
+        assert!(!keeps_card(OverlayMode::Hidden, false, false));
+        assert!(!keeps_card(OverlayMode::Word, false, false));
+        assert!(!keeps_card(OverlayMode::Word, true, true));
     }
 
     #[test]

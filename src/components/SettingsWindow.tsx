@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { FONT_OPTIONS } from "../data/sample";
@@ -150,6 +150,8 @@ export function SettingsWindow({
 }: SettingsWindowProps) {
   const [section, setSection] = useState<Section>("general");
   const [sampleActive, setSampleActive] = useState(false);
+  const sampleShowTimer = useRef<number | undefined>(undefined);
+  const sampleHideTimer = useRef<number | undefined>(undefined);
   const [aiKey, setAiKeyValue] = useState("");
   const [keyStatus, setKeyStatus] = useState<"idle" | "saving" | "saved">(
     "idle",
@@ -195,6 +197,38 @@ export function SettingsWindow({
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onSettingsChange({ ...settings, [key]: value });
+
+  function showSamplePreview() {
+    window.clearTimeout(sampleHideTimer.current);
+    window.clearTimeout(sampleShowTimer.current);
+    if (sampleActive) return;
+    sampleShowTimer.current = window.setTimeout(
+      () => setSampleActive(true),
+      settings.lookupDelayMs,
+    );
+  }
+
+  function hideSamplePreview() {
+    window.clearTimeout(sampleShowTimer.current);
+    window.clearTimeout(sampleHideTimer.current);
+    sampleHideTimer.current = window.setTimeout(
+      () => setSampleActive(false),
+      settings.wordCardLingerMs,
+    );
+  }
+
+  function showSamplePreviewNow() {
+    window.clearTimeout(sampleShowTimer.current);
+    window.clearTimeout(sampleHideTimer.current);
+    setSampleActive(true);
+  }
+
+  useEffect(() => {
+    return () => {
+      window.clearTimeout(sampleShowTimer.current);
+      window.clearTimeout(sampleHideTimer.current);
+    };
+  }, []);
 
   function updateRole(
     role: keyof AiRoles,
@@ -502,8 +536,9 @@ export function SettingsWindow({
               </label>
               <button
                 className={`hover-preview ${sampleActive ? "is-active" : ""}`}
-                onClick={() => setSampleActive(true)}
-                onMouseEnter={() => setSampleActive(true)}
+                onClick={showSamplePreviewNow}
+                onMouseEnter={showSamplePreview}
+                onMouseLeave={hideSamplePreview}
                 type="button"
               >
                 <span className="preview-line">
