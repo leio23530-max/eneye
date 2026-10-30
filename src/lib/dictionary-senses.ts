@@ -5,6 +5,7 @@ export interface DictionarySense {
   number: string;
   title: string;
   chinese: string;
+  pos: string;
   meta: string;
   html: string;
 }
@@ -26,6 +27,7 @@ export function parseDictionarySenses(html: string): DictionarySense[] {
   const document = new DOMParser().parseFromString(html, "text/html");
   const senses: DictionarySense[] = [];
   const seen = new Set<string>();
+  let pos = "";
   let section = "";
   let sectionZh = "";
 
@@ -35,6 +37,15 @@ export function parseDictionarySenses(html: string): DictionarySense[] {
   );
   while (walker.nextNode()) {
     const element = walker.currentNode as Element;
+    if (element.matches("div.entry")) {
+      const posElement =
+        element.querySelector(":scope > .top-container .pos") ??
+        element.querySelector(".pos");
+      pos = compact(posElement?.textContent);
+      section = "";
+      sectionZh = "";
+      continue;
+    }
     if (element.matches("h2.shcut")) {
       section = headingText(element);
       sectionZh = compact(element.querySelector("shcut chn")?.textContent);
@@ -69,7 +80,7 @@ export function parseDictionarySenses(html: string): DictionarySense[] {
     );
 
     const title = idiom || definition || section || "释义";
-    const dedupeKey = [section, idiom, title, chinese, meta].join("|");
+    const dedupeKey = [pos, section, idiom, title, chinese, meta].join("|");
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     senses.push({
@@ -79,6 +90,7 @@ export function parseDictionarySenses(html: string): DictionarySense[] {
       number: number === "❑" ? "" : number,
       title,
       chinese,
+      pos,
       meta: idiom ? definition : meta,
       html: element.outerHTML,
     });

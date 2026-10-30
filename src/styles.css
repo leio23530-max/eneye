@@ -2334,3 +2334,30 @@ select {
 .sense-fallback > details > div {
   margin-top: 8px;
 }
+
+.sense-meta-line {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  margin-bottom: 3px;
+  overflow: hidden;
+}
+
+.sense-pos {
+  background: var(--accent-soft);
+  border-radius: 4px;
+  color: var(--accent-strong);
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 650;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.sense-meta-line .sense-section {
+  display: inline;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

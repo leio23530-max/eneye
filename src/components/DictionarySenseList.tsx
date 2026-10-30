@@ -3,6 +3,29 @@ import { parseDictionarySenses } from "../lib/dictionary-senses";
 import { sanitizeDictionaryHtml } from "../lib/dictionary-html";
 import { Icon } from "./Icon";
 
+const POS_LABELS: Record<string, string> = {
+  noun: "名词",
+  verb: "动词",
+  adjective: "形容词",
+  adverb: "副词",
+  "linking verb": "系动词",
+  "modal verb": "情态动词",
+  "auxiliary verb": "助动词",
+  "phrasal verb": "短语动词",
+  preposition: "介词",
+  pronoun: "代词",
+  conjunction: "连词",
+  determiner: "限定词",
+  exclamation: "感叹词",
+  number: "数词",
+};
+
+function formatPos(pos: string): string {
+  const normalized = pos.trim().toLowerCase();
+  const chinese = POS_LABELS[normalized];
+  return chinese ? pos + " · " + chinese : pos;
+}
+
 interface DictionarySenseListProps {
   html: string;
   dictionaryId: string;
@@ -58,10 +81,17 @@ export function DictionarySenseList({
             >
               <span className="sense-number">{sense.number || "•"}</span>
               <span className="sense-copy">
-                {sense.section && (
-                  <span className="sense-section">
-                    {sense.section}
-                    {sense.sectionZh ? " · " + sense.sectionZh : ""}
+                {(sense.pos || sense.section) && (
+                  <span className="sense-meta-line">
+                    {sense.pos && (
+                      <span className="sense-pos">{formatPos(sense.pos)}</span>
+                    )}
+                    {sense.section && (
+                      <span className="sense-section">
+                        {sense.section}
+                        {sense.sectionZh ? " · " + sense.sectionZh : ""}
+                      </span>
+                    )}
                   </span>
                 )}
                 <strong>{sense.title}</strong>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseDictionarySenses } from "./dictionary-senses";
 
 const HTML = `<html><body>
+<div class="entry"><div class="top-container"><span class="pos">verb</span></div>
 <h2 class="shcut">in position<shcut><chn>位置</chn></shcut></h2>
 <ol class="senses_multiple">
   <li class="sense" id="place_sng_1">
@@ -17,12 +18,14 @@ const HTML = `<html><body>
 <span class="idm-g"><div class="webtop"><span class="idm">in place</span></div>
   <ol><li class="sense"><span class="sensetop"><span class="def">ready</span><deft><chn>就绪</chn></deft></span></li></ol>
 </span>
+</div>
 </body></html>`;
 
 describe("parseDictionarySenses", () => {
   it("extracts sections, definitions, translations, and idioms", () => {
     const senses = parseDictionarySenses(HTML);
     expect(senses).toHaveLength(3);
+    expect(senses[0].pos).toBe("verb");
     expect(senses[0].section).toBe("in position");
     expect(senses[0].sectionZh).toBe("位置");
     expect(senses[0].title).toBe("to put something somewhere");
