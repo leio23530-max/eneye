@@ -7,3 +7,5 @@ src-tauri/gen/
 *.log
 .DS_Store
 artifacts/
+src-tauri/resources/ecdic.sqlite
+src-tauri/resources/ecdic.sqlite-*

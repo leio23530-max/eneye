@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:app",
     "frontendDist": "../dist"
   },
   "app": {
@@ -23,12 +23,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost https: http://127.0.0.1:*; script-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost http://eneye-dict.localhost; media-src 'self' http://eneye-dict.localhost; style-src 'self' 'unsafe-inline' http://eneye-dict.localhost; font-src 'self' data: http://eneye-dict.localhost; connect-src ipc: http://ipc.localhost http://eneye-dict.localhost https: http://127.0.0.1:*; script-src 'self'"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": ["resources/ecdic.sqlite", "resources/ecdic.manifest.json"],
     "windows": {
       "nsis": {
         "installMode": "currentUser"

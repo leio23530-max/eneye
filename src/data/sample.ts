@@ -13,7 +13,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bodyFont: "Segoe UI",
   sourceLanguage: "auto",
   targetLanguage: "简体中文",
-  aiBaseUrl: "https://api.openai.com/v1",
+  aiProtocol: "auto",
+  aiBaseUrl: "https://api.deepseek.com",
   aiModel: "",
 };
 

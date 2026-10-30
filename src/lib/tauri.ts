@@ -1,3 +1,5 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
@@ -11,10 +13,5 @@ export function getWindowKind(): "overlay" | "settings" {
   }
   if (!isTauriRuntime()) return "settings";
 
-  const internals = window.__TAURI_INTERNALS__ as {
-    metadata?: { currentWindow?: { label?: string } };
-  };
-  return internals.metadata?.currentWindow?.label === "overlay"
-    ? "overlay"
-    : "settings";
+  return getCurrentWindow().label === "overlay" ? "overlay" : "settings";
 }

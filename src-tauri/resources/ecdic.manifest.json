@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "source": "ECDICT",
+  "source_commit": "ab22ad36302cafc6349a050e2b60894855208055",
+  "source_sha256": "d1ecbdf9ee2b920afb6f430ca6b6bb9f559588cf0dff86e04bd255f9390843cc",
+  "entry_count": "770611",
+  "sqlite_sha256": "acbd43960f2725508d107de68df24014d922be54de803956a42b72fe0efc3e54",
+  "sqlite_bytes": 117399552
+}

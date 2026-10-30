@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import DOMPurify from "dompurify";
 import { Icon } from "./Icon";
 import { IconButton } from "./IconButton";
 import type { AppSettings, LookupResult, TranslationState } from "../types";
+import { sanitizeDictionaryHtml } from "../lib/dictionary-html";
 
 interface OverlayCardProps {
   lookup: LookupResult;
@@ -107,6 +107,15 @@ export function OverlayCard({
     window.setTimeout(() => setCopied(false), 1200);
   }
 
+  function pronounceWord() {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(lookup.word);
+    utterance.lang = "en-US";
+    utterance.rate = 0.9;
+    window.speechSynthesis.speak(utterance);
+  }
+
   const cardStyle = {
     "--headword-font": `"${settings.headwordFont}", Georgia, serif`,
     "--body-font": `"${settings.bodyFont}", "Segoe UI", "Microsoft YaHei UI", sans-serif`,
@@ -128,6 +137,7 @@ export function OverlayCard({
               <button
                 aria-label={`朗读 ${lookup.word}`}
                 className="text-action pronunciation-action"
+                onClick={pronounceWord}
                 type="button"
               >
                 <Icon name="volume" size={16} />
@@ -200,16 +210,7 @@ export function OverlayCard({
               <div
                 className="rich-dictionary-content"
                 dangerouslySetInnerHTML={{
-                  __html: DOMPurify.sanitize(main.html, {
-                    FORBID_TAGS: [
-                      "script",
-                      "form",
-                      "iframe",
-                      "object",
-                      "embed",
-                    ],
-                    FORBID_ATTR: ["style"],
-                  }),
+                  __html: sanitizeDictionaryHtml(main.html, main.dictionaryId),
                 }}
               />
             )}
