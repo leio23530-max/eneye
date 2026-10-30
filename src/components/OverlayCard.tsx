@@ -11,6 +11,7 @@ import type {
 import { addWordToNotebook, listNotebooks } from "../lib/api";
 import { isTauriRuntime } from "../lib/tauri";
 import { DictionarySenseList } from "./DictionarySenseList";
+import { PhoneticLines } from "./PhoneticLines";
 
 interface OverlayCardProps {
   lookup: LookupResult;
@@ -190,7 +191,7 @@ export function OverlayCard({
           <div>
             <h1 className="headword">{lookup.word}</h1>
             <div className="pronunciation-row">
-              {main?.phonetic && <span>{main.phonetic}</span>}
+              <PhoneticLines value={main?.phonetic} />
               <button
                 aria-label={`朗读 ${lookup.word}`}
                 className="text-action pronunciation-action"

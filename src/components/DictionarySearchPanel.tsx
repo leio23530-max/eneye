@@ -3,6 +3,7 @@ import { searchDictionary } from "../lib/api";
 import type { LookupResult } from "../types";
 import { DictionarySenseList } from "./DictionarySenseList";
 import { Icon } from "./Icon";
+import { PhoneticLines } from "./PhoneticLines";
 
 export function DictionarySearchPanel() {
   const [query, setQuery] = useState("");
@@ -85,7 +86,7 @@ export function DictionarySearchPanel() {
               >
                 <div className="search-entry-head">
                   <strong>{entry.dictionaryName}</strong>
-                  {entry.phonetic && <span>{entry.phonetic}</span>}
+                  <PhoneticLines value={entry.phonetic} />
                 </div>
                 {entry.html ? (
                   <DictionarySenseList

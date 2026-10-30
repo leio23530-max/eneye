@@ -263,7 +263,7 @@ fn extract_phonetic(html: &str) -> Option<String> {
             break;
         }
     }
-    (!values.is_empty()).then(|| values.join("  "))
+    (!values.is_empty()).then(|| values.join("\n"))
 }
 
 fn clean_inline_html(html: &str) -> String {
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn extracts_phonetics_from_html_entries() {
         let html = r#"<span class="phon">/meɪk/</span><span class="phon">/meɪk/</span><span class="phon">/sɑːlvd/</span>"#;
-        assert_eq!(extract_phonetic(html).as_deref(), Some("/meɪk/  /sɑːlvd/"));
+        assert_eq!(extract_phonetic(html).as_deref(), Some("/meɪk/\n/sɑːlvd/"));
         assert_eq!(extract_phonetic("<span>no phonetic</span>"), None);
     }
 
