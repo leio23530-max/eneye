@@ -126,6 +126,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
         let mut stability_anchor = (0, 0);
         let mut stable_since = Instant::now();
         let mut down_at: Option<(i32, i32)> = None;
+        let mut down_on_overlay = false;
         let mut preflight: Option<(HoverCandidate, WordProbeReport)> = None;
         let mut resolved_for_dwell = false;
         let mut leave_since: Option<Instant> = None;
@@ -170,6 +171,8 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     pointer = (x, y);
                     stability_anchor = pointer;
                     down_at = Some((x, y));
+                    down_on_overlay =
+                        overlay_is_visible(&app) && point_inside_overlay(&app, (x, y));
                     stable_since = Instant::now();
                     preflight = None;
                     resolved_for_dwell = false;
@@ -187,9 +190,19 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                                 || (y - start_y).abs() >= DRAG_THRESHOLD
                         })
                         .unwrap_or(false);
-                    if dragged {
-                        handle_selection(&app, &automation, drag_origin.unwrap_or((x, y)), (x, y));
+                    let end_on_overlay =
+                        overlay_is_visible(&app) && point_inside_overlay(&app, (x, y));
+                    let start = drag_origin.unwrap_or((x, y));
+                    let selection_blocked = selection_should_be_ignored(
+                        down_on_overlay,
+                        end_on_overlay,
+                        point_inside_own_process(start),
+                        point_inside_own_process((x, y)),
+                    );
+                    if dragged && !selection_blocked {
+                        handle_selection(&app, &automation, start, (x, y));
                     }
+                    down_on_overlay = false;
                     stability_anchor = pointer;
                     stable_since = Instant::now();
                 }
@@ -586,6 +599,14 @@ fn handle_selection(
     if is_screenshot_overlay_at(start) || is_screenshot_overlay_at(end) {
         return;
     }
+    if point_inside_own_process(start) || point_inside_own_process(end) {
+        return;
+    }
+    if overlay_is_visible(app)
+        && (point_inside_overlay(app, start) || point_inside_overlay(app, end))
+    {
+        return;
+    }
     if let Some(text) = uia_selection(automation, start) {
         show_translation_for_text(app, text, "uia", end);
     } else if let Some(text) = copy_selection_text() {
@@ -862,6 +883,15 @@ fn outside_word_anchor(pointer: (i32, i32), anchor: Option<(i32, i32)>) -> bool 
 }
 
 #[allow(clippy::too_many_arguments)]
+fn selection_should_be_ignored(
+    down_on_overlay: bool,
+    end_on_overlay: bool,
+    start_in_own_process: bool,
+    end_in_own_process: bool,
+) -> bool {
+    down_on_overlay || end_on_overlay || start_in_own_process || end_in_own_process
+}
+
 fn should_start_leave_timer(
     mode: OverlayMode,
     pinned: bool,
@@ -1146,6 +1176,15 @@ mod tests {
             (400, 400),
             Some((100, 100)),
         ));
+    }
+
+    #[test]
+    fn drags_on_the_overlay_never_become_text_selections() {
+        assert!(selection_should_be_ignored(true, false, false, false));
+        assert!(selection_should_be_ignored(false, true, false, false));
+        assert!(selection_should_be_ignored(false, false, true, false));
+        assert!(selection_should_be_ignored(false, false, false, true));
+        assert!(!selection_should_be_ignored(false, false, false, false));
     }
 
     #[test]
