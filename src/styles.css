@@ -2176,3 +2176,161 @@ select {
 .external-dictionary > button:disabled {
   opacity: 0.38;
 }
+
+/* Dictionary senses */
+.sense-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.sense-item {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.sense-item.is-open {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.sense-summary {
+  align-items: start;
+  background: var(--surface);
+  border: 0;
+  color: var(--ink);
+  display: grid;
+  font: inherit;
+  gap: 9px;
+  grid-template-columns: 22px minmax(0, 1fr) 16px;
+  padding: 10px 11px;
+  text-align: left;
+  width: 100%;
+}
+
+.sense-summary:hover {
+  background: var(--surface-muted);
+}
+
+.sense-item.is-open .sense-summary {
+  background: var(--surface-muted);
+}
+
+.sense-number {
+  align-items: center;
+  background: var(--accent-soft);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  display: flex;
+  font-size: 10px;
+  font-weight: 650;
+  height: 20px;
+  justify-content: center;
+  min-width: 20px;
+}
+
+.sense-copy {
+  min-width: 0;
+}
+
+.sense-copy strong {
+  color: var(--ink);
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sense-copy small {
+  color: var(--ink-soft);
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sense-copy em {
+  color: var(--ink-faint);
+  display: block;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.4;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sense-section {
+  color: var(--accent-strong);
+  display: block;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+  text-transform: uppercase;
+}
+
+.sense-body {
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.7;
+  max-height: 340px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.sense-body .def {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.sense-body .deft,
+.sense-body chn {
+  color: var(--accent-strong);
+}
+
+.sense-body .x,
+.sense-body .unx {
+  display: block;
+  margin: 5px 0;
+}
+
+.sense-body .examples,
+.sense-body .collocs_list {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.sense-body .sound,
+.sense-body .symbols,
+.sense-body .jumplinks {
+  display: none;
+}
+
+.sense-body img {
+  height: auto;
+  max-width: 100%;
+}
+
+.sense-fallback {
+  margin-top: 10px;
+}
+
+.sense-fallback summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.sense-fallback > details > div {
+  margin-top: 8px;
+}

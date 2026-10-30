@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { searchDictionary } from "../lib/api";
-import { sanitizeDictionaryHtml } from "../lib/dictionary-html";
 import type { LookupResult } from "../types";
+import { DictionarySenseList } from "./DictionarySenseList";
 import { Icon } from "./Icon";
 
 export function DictionarySearchPanel() {
@@ -87,27 +87,22 @@ export function DictionarySearchPanel() {
                   <strong>{entry.dictionaryName}</strong>
                   {entry.phonetic && <span>{entry.phonetic}</span>}
                 </div>
-                {entry.definitions.length > 0 && (
-                  <div className="search-entry-definitions">
-                    {entry.definitions.map((definition, definitionIndex) => (
-                      <p key={definition + "-" + definitionIndex}>
-                        {definition}
-                      </p>
-                    ))}
-                  </div>
-                )}
-                {entry.html && index < 3 && (
-                  <details className="search-entry-html">
-                    <summary>完整释义</summary>
-                    <div
-                      dangerouslySetInnerHTML={{
-                        __html: sanitizeDictionaryHtml(
-                          entry.html,
-                          entry.dictionaryId,
-                        ),
-                      }}
-                    />
-                  </details>
+                {entry.html ? (
+                  <DictionarySenseList
+                    definitions={entry.definitions}
+                    dictionaryId={entry.dictionaryId}
+                    html={entry.html}
+                  />
+                ) : (
+                  entry.definitions.length > 0 && (
+                    <div className="search-entry-definitions">
+                      {entry.definitions.map((definition, definitionIndex) => (
+                        <p key={definition + "-" + definitionIndex}>
+                          {definition}
+                        </p>
+                      ))}
+                    </div>
+                  )
                 )}
               </article>
             ))

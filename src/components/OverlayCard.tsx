@@ -9,8 +9,8 @@ import type {
   TranslationState,
 } from "../types";
 import { addWordToNotebook, listNotebooks } from "../lib/api";
-import { sanitizeDictionaryHtml } from "../lib/dictionary-html";
 import { isTauriRuntime } from "../lib/tauri";
+import { DictionarySenseList } from "./DictionarySenseList";
 
 interface OverlayCardProps {
   lookup: LookupResult;
@@ -279,42 +279,46 @@ export function OverlayCard({
                 {lookup.source === "ocr" ? "屏幕识别" : "系统取词"}
               </span>
             </div>
-            <div className="definition-line">
-              {main.partOfSpeech && (
-                <span className="part-of-speech">{main.partOfSpeech}</span>
-              )}
-              <div className="definitions">
-                {main.definitions.map((definition, index) => (
-                  <p key={`${definition}-${index}`}>{definition}</p>
-                ))}
-              </div>
-            </div>
-            {main.inflections && (
-              <p className="inflections">
-                <span>变形</span>
-                {main.inflections}
-              </p>
-            )}
-            {main.examples.length > 0 && (
-              <div className="example-block">
-                <p className="eyebrow">例句</p>
-                {main.examples.map((example, index) => (
-                  <p
-                    className={index % 2 === 0 ? "example-en" : "example-zh"}
-                    key={`${example}-${index}`}
-                  >
-                    {example}
-                  </p>
-                ))}
-              </div>
-            )}
-            {main.html && (
-              <div
-                className="rich-dictionary-content"
-                dangerouslySetInnerHTML={{
-                  __html: sanitizeDictionaryHtml(main.html, main.dictionaryId),
-                }}
+            {main.html ? (
+              <DictionarySenseList
+                definitions={main.definitions}
+                dictionaryId={main.dictionaryId}
+                html={main.html}
               />
+            ) : (
+              <>
+                <div className="definition-line">
+                  {main.partOfSpeech && (
+                    <span className="part-of-speech">{main.partOfSpeech}</span>
+                  )}
+                  <div className="definitions">
+                    {main.definitions.map((definition, index) => (
+                      <p key={definition + "-" + index}>{definition}</p>
+                    ))}
+                  </div>
+                </div>
+                {main.inflections && (
+                  <p className="inflections">
+                    <span>变形</span>
+                    {main.inflections}
+                  </p>
+                )}
+                {main.examples.length > 0 && (
+                  <div className="example-block">
+                    <p className="eyebrow">例句</p>
+                    {main.examples.map((example, index) => (
+                      <p
+                        className={
+                          index % 2 === 0 ? "example-en" : "example-zh"
+                        }
+                        key={example + "-" + index}
+                      >
+                        {example}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </section>
         )}
