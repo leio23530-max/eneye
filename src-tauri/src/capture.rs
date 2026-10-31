@@ -1067,15 +1067,17 @@ fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
     };
     let (line_text, words) = &lines[line_index];
     let mut candidates = Vec::new();
-    let ends_with_hyphen = line_text.trim_end().ends_with('-')
-        || words
-            .last()
-            .is_some_and(|word| word.trim_end().ends_with('-'));
-    if ends_with_hyphen
-        && selected_touches_line_hyphen(words, word_index)
+    let line_has_hyphen = line_text.contains('-') || words.iter().any(|word| word.contains('-'));
+    if line_has_hyphen
+        && let Some(hyphen_index) = adjacent_hyphen_index(words, word_index)
         && let Some((_, next_words)) = lines.get(line_index + 1)
     {
-        candidates.extend(hyphenated_candidates(words, word_index, next_words));
+        candidates.extend(hyphenated_candidates(
+            words,
+            word_index,
+            hyphen_index,
+            next_words,
+        ));
     }
     if let Some(word) = words
         .get(word_index)
@@ -1096,18 +1098,23 @@ fn letters_fragment(text: &str) -> String {
     text.chars().filter(char::is_ascii_alphabetic).collect()
 }
 
-fn selected_touches_line_hyphen(words: &[String], selected: usize) -> bool {
-    match words
-        .iter()
-        .rposition(|word| word.trim_end().ends_with('-'))
-    {
-        Some(index) => selected == index || selected + 1 == index,
-        None => selected + 1 >= words.len(),
+fn adjacent_hyphen_index(words: &[String], selected: usize) -> Option<usize> {
+    if words.get(selected)?.trim_end().ends_with('-') {
+        return Some(selected);
     }
+    if words.get(selected + 1)?.trim_end().ends_with('-') {
+        return Some(selected + 1);
+    }
+    None
 }
 
-fn hyphenated_candidates(words: &[String], selected: usize, next_words: &[String]) -> Vec<String> {
-    if selected >= words.len() {
+fn hyphenated_candidates(
+    words: &[String],
+    selected: usize,
+    hyphen_index: usize,
+    next_words: &[String],
+) -> Vec<String> {
+    if selected >= words.len() || hyphen_index < selected || hyphen_index >= words.len() {
         return Vec::new();
     }
     let mut bases = Vec::new();
@@ -1116,7 +1123,10 @@ fn hyphenated_candidates(words: &[String], selected: usize, next_words: &[String
         selected.saturating_sub(1),
         selected.saturating_sub(2),
     ] {
-        let base = words[start..]
+        if start > hyphen_index {
+            continue;
+        }
+        let base = words[start..=hyphen_index]
             .iter()
             .map(|word| letters_fragment(word))
             .collect::<String>();
@@ -1391,18 +1401,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_joins_words_next_to_the_line_end_hyphen() {
+    fn only_joins_words_adjacent_to_a_trailing_hyphen() {
         let words = ["Edge-cloud", "synergy:", "The", "data", "incor-"]
             .iter()
             .map(|word| word.to_string())
             .collect::<Vec<_>>();
-        assert!(!selected_touches_line_hyphen(&words, 0));
+        assert_eq!(adjacent_hyphen_index(&words, 0), None);
         let words = ["directional", "i", "den-"]
             .iter()
             .map(|word| word.to_string())
             .collect::<Vec<_>>();
-        assert!(selected_touches_line_hyphen(&words, 1));
-        assert!(selected_touches_line_hyphen(&words, 2));
+        assert_eq!(adjacent_hyphen_index(&words, 1), Some(2));
+        assert_eq!(adjacent_hyphen_index(&words, 2), Some(2));
+        assert_eq!(adjacent_hyphen_index(&words, 0), None);
     }
 
     #[test]
@@ -1415,9 +1426,9 @@ mod tests {
             .iter()
             .map(|word| word.to_string())
             .collect::<Vec<_>>();
-        let candidates = hyphenated_candidates(&words, 2, &next);
+        let candidates = hyphenated_candidates(&words, 2, 2, &next);
         assert!(candidates.iter().any(|word| word == "identification"));
-        let candidates = hyphenated_candidates(&words, 1, &next);
+        let candidates = hyphenated_candidates(&words, 1, 2, &next);
         assert!(candidates.iter().any(|word| word == "identification"));
     }
 
