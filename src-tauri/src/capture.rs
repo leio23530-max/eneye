@@ -258,9 +258,6 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             if elapsed >= PREFLIGHT_MS && preflight.is_none() && !resolved_for_dwell {
                 let probe_point = pointer;
                 let mut accessible = word_probe::probe_accessible(&automation, pointer);
-                if prefers_ocr_at(pointer) {
-                    accessible.word = None;
-                }
                 if !cursor_still_matches(probe_point) {
                     pointer = current_cursor_position();
                     stability_anchor = pointer;
@@ -279,9 +276,10 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                 {
                     let uia_lower = uia_text.to_lowercase();
                     let ocr_lower = ocr_word.to_lowercase();
-                    if ocr_lower.chars().count() > uia_lower.chars().count()
-                        && ocr_lower.starts_with(&uia_lower)
-                    {
+                    let uia_has_punctuation = uia_lower.contains('\'') || uia_lower.contains('-');
+                    let ocr_extends = ocr_lower.chars().count() > uia_lower.chars().count()
+                        && ocr_lower.starts_with(&uia_lower);
+                    if ocr_lower != uia_lower && (!uia_has_punctuation || ocr_extends) {
                         accessible.word = Some((ocr_word, "ocr"));
                     }
                 }
@@ -891,28 +889,6 @@ fn is_screenshot_overlay_at(point: (i32, i32)) -> bool {
     process_name_at(point).is_some_and(|name| is_screenshot_process(&name))
 }
 
-fn is_pdf_reader_process(name: &str) -> bool {
-    matches!(
-        name,
-        "neoread.exe"
-            | "acrord32.exe"
-            | "acrobat.exe"
-            | "sumatrapdf.exe"
-            | "foxitpdfreader.exe"
-            | "pdfxedit.exe"
-    )
-}
-
-#[cfg(windows)]
-fn prefers_ocr_at(point: (i32, i32)) -> bool {
-    process_name_at(point).is_some_and(|name| is_pdf_reader_process(&name))
-}
-
-#[cfg(not(windows))]
-fn prefers_ocr_at(_point: (i32, i32)) -> bool {
-    false
-}
-
 #[cfg(windows)]
 fn process_name_at(point: (i32, i32)) -> Option<String> {
     use windows::{
@@ -1092,8 +1068,13 @@ fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
     let (line_text, words) = &lines[line_index];
     let mut candidates = Vec::new();
     let ends_with_hyphen = line_text.trim_end().ends_with('-')
-        || words.iter().any(|word| word.trim_end().ends_with('-'));
-    if ends_with_hyphen && let Some((_, next_words)) = lines.get(line_index + 1) {
+        || words
+            .last()
+            .is_some_and(|word| word.trim_end().ends_with('-'));
+    if ends_with_hyphen
+        && selected_touches_line_hyphen(words, word_index)
+        && let Some((_, next_words)) = lines.get(line_index + 1)
+    {
         candidates.extend(hyphenated_candidates(words, word_index, next_words));
     }
     if let Some(word) = words
@@ -1113,6 +1094,16 @@ fn ocr_word_candidates_at(_x: i32, _y: i32) -> anyhow::Result<Vec<String>> {
 
 fn letters_fragment(text: &str) -> String {
     text.chars().filter(char::is_ascii_alphabetic).collect()
+}
+
+fn selected_touches_line_hyphen(words: &[String], selected: usize) -> bool {
+    match words
+        .iter()
+        .rposition(|word| word.trim_end().ends_with('-'))
+    {
+        Some(index) => selected == index || selected + 1 == index,
+        None => selected + 1 >= words.len(),
+    }
 }
 
 fn hyphenated_candidates(words: &[String], selected: usize, next_words: &[String]) -> Vec<String> {
@@ -1400,6 +1391,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_joins_words_next_to_the_line_end_hyphen() {
+        let words = ["Edge-cloud", "synergy:", "The", "data", "incor-"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect::<Vec<_>>();
+        assert!(!selected_touches_line_hyphen(&words, 0));
+        let words = ["directional", "i", "den-"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect::<Vec<_>>();
+        assert!(selected_touches_line_hyphen(&words, 1));
+        assert!(selected_touches_line_hyphen(&words, 2));
+    }
+
+    #[test]
     fn reconstructs_a_word_split_across_a_hyphenated_line_break() {
         let words = ["directional", "i", "den-"]
             .iter()
@@ -1439,14 +1445,6 @@ mod tests {
         ));
         assert!(!is_usable_selection("hello"));
         assert!(!is_usable_selection("1234"));
-    }
-
-    #[test]
-    fn pdf_readers_use_ocr_before_their_unreliable_text_layer() {
-        assert!(is_pdf_reader_process("neoread.exe"));
-        assert!(is_pdf_reader_process("acrord32.exe"));
-        assert!(!is_pdf_reader_process("notepad.exe"));
-        assert!(!is_pdf_reader_process("msedge.exe"));
     }
 
     #[test]
