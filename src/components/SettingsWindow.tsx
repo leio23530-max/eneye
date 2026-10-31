@@ -632,6 +632,24 @@ export function SettingsWindow({
                   <span>持久 5000ms</span>
                 </span>
               </label>
+              <label className="range-field range-field-secondary">
+                <span>悬浮窗距鼠标 · {settings.overlayOffsetPx}px</span>
+                <input
+                  aria-label="悬浮窗距鼠标"
+                  max="64"
+                  min="0"
+                  onChange={(event) =>
+                    update("overlayOffsetPx", Number(event.target.value))
+                  }
+                  step="2"
+                  type="range"
+                  value={settings.overlayOffsetPx}
+                />
+                <span className="range-labels">
+                  <span>贴近 0px</span>
+                  <span>远离 64px</span>
+                </span>
+              </label>
               <button
                 className={`hover-preview ${sampleActive ? "is-active" : ""}`}
                 onClick={showSamplePreviewNow}

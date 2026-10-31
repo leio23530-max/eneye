@@ -41,6 +41,7 @@ export interface TranslationState {
 export interface AppSettings {
   lookupDelayMs: number;
   wordCardLingerMs: number;
+  overlayOffsetPx: number;
   autoTranslate: boolean;
   launchAtStartup: boolean;
   headwordFont: string;

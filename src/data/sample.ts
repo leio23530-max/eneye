@@ -8,6 +8,7 @@ import type {
 export const DEFAULT_SETTINGS: AppSettings = {
   lookupDelayMs: 240,
   wordCardLingerMs: 1500,
+  overlayOffsetPx: 20,
   autoTranslate: true,
   launchAtStartup: false,
   headwordFont: "Georgia",

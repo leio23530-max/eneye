@@ -613,13 +613,20 @@ fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
             )
         })
         .unwrap_or((0, 0, 1920, 1080));
-    let mut x = point.0 + 18;
-    let mut y = point.1 + 22;
+    let offset = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .map(|settings| settings.overlay_offset_px as i32)
+        .unwrap_or(20)
+        .clamp(0, 64);
+    let mut x = point.0 + offset;
+    let mut y = point.1 + offset;
     if x + WIDTH + GAP > right {
-        x = point.0 - WIDTH - 18;
+        x = point.0 - WIDTH - offset;
     }
     if y + HEIGHT + GAP > bottom {
-        y = point.1 - HEIGHT - 18;
+        y = point.1 - HEIGHT - offset;
     }
     x = x.clamp(left + GAP, (right - WIDTH - GAP).max(left + GAP));
     y = y.clamp(top + GAP, (bottom - HEIGHT - GAP).max(top + GAP));
