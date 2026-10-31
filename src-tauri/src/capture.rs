@@ -139,8 +139,17 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
         let mut preflight: Option<(HoverCandidate, WordProbeReport)> = None;
         let mut resolved_for_dwell = false;
         let mut leave_since: Option<Instant> = None;
+        let mut applied_offset = overlay_offset(&app);
 
         loop {
+            let current_offset = overlay_offset(&app);
+            if current_offset != applied_offset {
+                applied_offset = current_offset;
+                if let Some(anchor) = overlay_anchor(&app) {
+                    position_overlay(&app, anchor);
+                }
+            }
+
             let event = receiver.recv_timeout(Duration::from_millis(20));
             match event {
                 Ok(MouseInput {
@@ -470,6 +479,15 @@ fn best_ocr_word(app: &tauri::AppHandle, candidates: &[String]) -> Option<String
     best
 }
 
+fn overlay_offset(app: &tauri::AppHandle) -> i32 {
+    app.state::<AppState>()
+        .settings
+        .lock()
+        .map(|settings| settings.overlay_offset_px as i32)
+        .unwrap_or(20)
+        .clamp(0, 64)
+}
+
 fn lookup_delay(app: &tauri::AppHandle) -> u64 {
     app.state::<AppState>()
         .settings
@@ -613,13 +631,7 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
             )
         })
         .unwrap_or((0, 0, 1920, 1080));
-    let offset = app
-        .state::<AppState>()
-        .settings
-        .lock()
-        .map(|settings| settings.overlay_offset_px as i32)
-        .unwrap_or(20)
-        .clamp(0, 64);
+    let offset = overlay_offset(app);
     let mut x = point.0 + offset;
     let mut y = point.1 + offset;
     if x + WIDTH + GAP > right {

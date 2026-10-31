@@ -145,12 +145,7 @@ fn save_settings(
         .settings
         .lock()
         .map_err(|_| "settings lock is poisoned".to_owned())? = saved.clone();
-    let visible = app
-        .get_webview_window("overlay")
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false);
-    if visible
-        && let Ok(anchor) = state.overlay_anchor.lock()
+    if let Ok(anchor) = state.overlay_anchor.lock()
         && let Some(point) = *anchor
     {
         capture::position_overlay(&app, point);
