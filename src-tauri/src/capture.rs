@@ -257,7 +257,10 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             let delay = lookup_delay(&app);
             if elapsed >= PREFLIGHT_MS && preflight.is_none() && !resolved_for_dwell {
                 let probe_point = pointer;
-                let accessible = word_probe::probe_accessible(&automation, pointer);
+                let mut accessible = word_probe::probe_accessible(&automation, pointer);
+                if prefers_ocr_at(pointer) {
+                    accessible.word = None;
+                }
                 if !cursor_still_matches(probe_point) {
                     pointer = current_cursor_position();
                     stability_anchor = pointer;
@@ -266,6 +269,23 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     resolved_for_dwell = false;
                     continue;
                 }
+                // UIA often returns the first fragment of a word split across a
+                // line break. Verify the visible pixels and prefer a longer OCR
+                // word that extends the UIA word.
+                if let Some((uia_text, _)) = accessible.word.clone()
+                    && ocr_available()
+                    && let Ok(candidates) = ocr_word_candidates_at(pointer.0, pointer.1)
+                    && let Some(ocr_word) = best_ocr_word(&app, &candidates)
+                {
+                    let uia_lower = uia_text.to_lowercase();
+                    let ocr_lower = ocr_word.to_lowercase();
+                    if ocr_lower.chars().count() > uia_lower.chars().count()
+                        && ocr_lower.starts_with(&uia_lower)
+                    {
+                        accessible.word = Some((ocr_word, "ocr"));
+                    }
+                }
+
                 let candidate = match accessible.word {
                     Some((text, "msaa")) => HoverCandidate::Word {
                         text,
@@ -274,6 +294,10 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     Some((text, "win32")) => HoverCandidate::Word {
                         text,
                         source: "win32".into(),
+                    },
+                    Some((text, "ocr")) => HoverCandidate::Word {
+                        text,
+                        source: "ocr".into(),
                     },
                     Some((text, _)) => HoverCandidate::Word {
                         text,
@@ -322,29 +346,25 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                                 }
                                 continue;
                             }
-                            let mut best: Option<(String, crate::models::LookupResult)> = None;
+                            let mut best_word: Option<String> = None;
                             for candidate in &candidates {
-                                let Some(result) = lookup(&app, candidate, "ocr") else {
+                                let Some(result) = find_lookup(&app, candidate, "ocr") else {
                                     continue;
                                 };
                                 if result.entries.is_empty() {
                                     continue;
                                 }
-                                if best
+                                if best_word
                                     .as_ref()
-                                    .is_none_or(|(current, _)| candidate.len() > current.len())
+                                    .is_none_or(|current| candidate.len() > current.len())
                                 {
-                                    best = Some((candidate.clone(), result));
+                                    best_word = Some(candidate.clone());
                                 }
                             }
-                            let (mut word, mut lookup_result) = match best {
-                                Some((candidate, result)) => (candidate, Some(result)),
-                                None => {
-                                    let word = candidates.last().cloned().unwrap_or_default();
-                                    let result = lookup(&app, &word, "ocr");
-                                    (word, result)
-                                }
-                            };
+                            let mut word = best_word
+                                .or_else(|| candidates.last().cloned())
+                                .unwrap_or_default();
+                            let mut lookup_result = lookup(&app, &word, "ocr");
                             if lookup_result
                                 .as_ref()
                                 .is_none_or(|result| result.entries.is_empty())
@@ -409,16 +429,47 @@ fn store_probe_report(app: &tauri::AppHandle, report: &WordProbeReport) {
     }
 }
 
-fn lookup(app: &tauri::AppHandle, word: &str, source: &str) -> Option<crate::models::LookupResult> {
+fn find_lookup(
+    app: &tauri::AppHandle,
+    word: &str,
+    source: &str,
+) -> Option<crate::models::LookupResult> {
     let clean = clean_lookup_word(word).ok()?;
-    let state = app.state::<AppState>();
-    let result = state.dictionary.lock().ok()?.lookup(&clean, source).ok()?;
+    app.state::<AppState>()
+        .dictionary
+        .lock()
+        .ok()?
+        .lookup(&clean, source)
+        .ok()
+}
+
+fn lookup(app: &tauri::AppHandle, word: &str, source: &str) -> Option<crate::models::LookupResult> {
+    let result = find_lookup(app, word, source)?;
     if !result.entries.is_empty()
-        && let Ok(storage) = state.storage.lock()
+        && let Ok(storage) = app.state::<AppState>().storage.lock()
     {
         let _ = storage.record_lookup(&result);
     }
     Some(result)
+}
+
+fn best_ocr_word(app: &tauri::AppHandle, candidates: &[String]) -> Option<String> {
+    let mut best: Option<String> = None;
+    for candidate in candidates {
+        let Some(result) = find_lookup(app, candidate, "ocr") else {
+            continue;
+        };
+        if result.entries.is_empty() {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|current| candidate.len() > current.len())
+        {
+            best = Some(candidate.clone());
+        }
+    }
+    best
 }
 
 fn lookup_delay(app: &tauri::AppHandle) -> u64 {
@@ -838,6 +889,28 @@ fn is_screenshot_process(name: &str) -> bool {
 #[cfg(windows)]
 fn is_screenshot_overlay_at(point: (i32, i32)) -> bool {
     process_name_at(point).is_some_and(|name| is_screenshot_process(&name))
+}
+
+fn is_pdf_reader_process(name: &str) -> bool {
+    matches!(
+        name,
+        "neoread.exe"
+            | "acrord32.exe"
+            | "acrobat.exe"
+            | "sumatrapdf.exe"
+            | "foxitpdfreader.exe"
+            | "pdfxedit.exe"
+    )
+}
+
+#[cfg(windows)]
+fn prefers_ocr_at(point: (i32, i32)) -> bool {
+    process_name_at(point).is_some_and(|name| is_pdf_reader_process(&name))
+}
+
+#[cfg(not(windows))]
+fn prefers_ocr_at(_point: (i32, i32)) -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -1366,6 +1439,14 @@ mod tests {
         ));
         assert!(!is_usable_selection("hello"));
         assert!(!is_usable_selection("1234"));
+    }
+
+    #[test]
+    fn pdf_readers_use_ocr_before_their_unreliable_text_layer() {
+        assert!(is_pdf_reader_process("neoread.exe"));
+        assert!(is_pdf_reader_process("acrord32.exe"));
+        assert!(!is_pdf_reader_process("notepad.exe"));
+        assert!(!is_pdf_reader_process("msedge.exe"));
     }
 
     #[test]
