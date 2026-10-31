@@ -951,14 +951,22 @@ fn should_start_leave_timer(
 fn ocr_word_at(x: i32, y: i32) -> anyhow::Result<Option<String>> {
     use uiautomation::{screenshots::Screenshot, types::Rect};
 
+    const OCR_SCALE: u32 = 2;
     let rect = Rect::new(x - 220, y - 70, x + 220, y + 70);
     let screenshot = Screenshot::capture_rect(rect)?;
-    let bmp = screenshot.to_bmp_bytes();
+    let bmp = upscale_ocr_bitmap(&screenshot.to_bmp_bytes(), OCR_SCALE)?;
     let result = recognize_bmp(&bmp)?;
     for line in result.Lines()? {
         for word in line.Words()? {
             let bounds = word.BoundingRect()?;
-            if point_in_ocr_word(x, y, rect.get_left(), rect.get_top(), &bounds) {
+            if point_in_ocr_word(
+                x,
+                y,
+                rect.get_left(),
+                rect.get_top(),
+                &bounds,
+                OCR_SCALE as f32,
+            ) {
                 return Ok(clean_lookup_word(&word.Text()?.to_string()).ok());
             }
         }
@@ -1048,12 +1056,28 @@ fn point_in_ocr_word(
     crop_left: i32,
     crop_top: i32,
     bounds: &windows::Foundation::Rect,
+    scale: f32,
 ) -> bool {
-    let word_left = crop_left + bounds.X.round() as i32 - 3;
-    let word_top = crop_top + bounds.Y.round() as i32 - 3;
-    let word_right = word_left + bounds.Width.round() as i32 + 6;
-    let word_bottom = word_top + bounds.Height.round() as i32 + 6;
+    let word_left = crop_left + (bounds.X / scale).round() as i32 - 3;
+    let word_top = crop_top + (bounds.Y / scale).round() as i32 - 3;
+    let word_right = word_left + (bounds.Width / scale).round() as i32 + 6;
+    let word_bottom = word_top + (bounds.Height / scale).round() as i32 + 6;
     x >= word_left && x <= word_right && y >= word_top && y <= word_bottom
+}
+
+fn upscale_ocr_bitmap(bytes: &[u8], scale: u32) -> anyhow::Result<Vec<u8>> {
+    use image::{ImageFormat, imageops::FilterType};
+    use std::io::Cursor;
+
+    let image = image::load_from_memory_with_format(bytes, ImageFormat::Bmp)?;
+    let resized = image.resize_exact(
+        image.width() * scale,
+        image.height() * scale,
+        FilterType::Lanczos3,
+    );
+    let mut output = Cursor::new(Vec::new());
+    resized.write_to(&mut output, ImageFormat::Bmp)?;
+    Ok(output.into_inner())
 }
 
 #[cfg(windows)]
