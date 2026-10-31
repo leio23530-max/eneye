@@ -249,7 +249,6 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                 || point_inside_own_process(pointer)
                 || (overlay_is_visible(&app) && point_inside_card(&app, pointer))
                 || overlay_mode(&app) == OverlayMode::Translation
-                || (overlay_pinned(&app) && overlay_is_visible(&app))
             {
                 continue;
             }
@@ -299,9 +298,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
             resolved_for_dwell = true;
 
             let result = match candidate {
-                HoverCandidate::Word { text, source } => {
-                    lookup(&app, &text, &source).filter(|lookup| !lookup.entries.is_empty())
-                }
+                HoverCandidate::Word { text, source } => lookup(&app, &text, &source),
                 HoverCandidate::Ocr { x, y } => {
                     if !ocr_available() {
                         word_probe::update_ocr_stage(
@@ -333,7 +330,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                             );
                             report.word = Some(word.clone());
                             report.source = Some("ocr".into());
-                            lookup(&app, &word, "ocr").filter(|lookup| !lookup.entries.is_empty())
+                            lookup(&app, &word, "ocr")
                         }
                         Ok(None) => {
                             word_probe::update_ocr_stage(

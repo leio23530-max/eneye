@@ -214,13 +214,13 @@ fn probe_uia(
                 if let Ok(pattern) = current.get_pattern::<UIValuePattern>()
                     && let Ok(text) = pattern.get_value()
                     && let Some(word) =
-                        word_from_text_at_x(&text, point, bounds.as_ref().map(rect_tuple))
+                        word_from_single_label(&text, point, bounds.as_ref().map(rect_tuple))
                 {
                     return Some((word, "uia-value"));
                 }
                 if let Ok(text) = current.get_name()
                     && let Some(word) =
-                        word_from_text_at_x(&text, point, bounds.as_ref().map(rect_tuple))
+                        word_from_single_label(&text, point, bounds.as_ref().map(rect_tuple))
                 {
                     return Some((word, "uia-name"));
                 }
@@ -284,7 +284,7 @@ fn probe_msaa(point: (i32, i32)) -> Option<String> {
         .map(|value| value.to_string());
     name.into_iter()
         .chain(value)
-        .find_map(|text| word_from_text_at_x(&text, point, bounds))
+        .find_map(|text| word_from_single_label(&text, point, bounds))
 }
 
 #[cfg(not(windows))]
@@ -484,6 +484,17 @@ fn is_text_like_control_type(control_type: uiautomation::types::ControlType) -> 
     )
 }
 
+fn word_from_single_label(
+    text: &str,
+    point: (i32, i32),
+    bounds: Option<(i32, i32, i32, i32)>,
+) -> Option<String> {
+    if text.split_whitespace().count() != 1 {
+        return None;
+    }
+    word_from_text_at_x(text, point, bounds)
+}
+
 fn word_from_text_at_x(
     text: &str,
     point: (i32, i32),
@@ -562,6 +573,22 @@ mod tests {
         assert_eq!(
             word_from_text_at_x("Git", (450, 350), Some((100, 100, 800, 500))),
             None
+        );
+    }
+
+    #[test]
+    fn ignores_multiword_element_labels() {
+        assert_eq!(
+            word_from_single_label(
+                "deliver insufficient power",
+                (560, 640),
+                Some((500, 630, 300, 24))
+            ),
+            None
+        );
+        assert_eq!(
+            word_from_single_label("deliver", (510, 640), Some((500, 630, 60, 24))).as_deref(),
+            Some("deliver")
         );
     }
 

@@ -21,6 +21,7 @@ interface OverlayCardProps {
   onPinChange?: (pinned: boolean) => void;
   onRetryTranslation?: () => void;
   onCancelTranslation?: () => void;
+  onExplain?: (word: string) => void;
 }
 
 function useNearBottom(dependency: unknown) {
@@ -74,6 +75,7 @@ export function OverlayCard({
   onPinChange,
   onRetryTranslation,
   onCancelTranslation,
+  onExplain,
 }: OverlayCardProps) {
   const [pinned, setPinned] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -272,6 +274,30 @@ export function OverlayCard({
         ref={scrollRef}
         tabIndex={0}
       >
+        {!main && (
+          <section className="empty-definition">
+            <div className="dictionary-label">
+              <span>词典未收录</span>
+              <span className="source-indicator">
+                {lookup.source === "ocr" ? "屏幕识别" : "系统取词"}
+              </span>
+            </div>
+            <p className="empty-definition-title">{lookup.word}</p>
+            <p className="empty-definition-text">
+              内置词典和已导入词典里都没有找到这个词。它可能是专业术语、新词或拼写变体。
+            </p>
+            {onExplain && (
+              <button
+                className="text-action empty-definition-action"
+                onClick={() => onExplain(lookup.word)}
+                type="button"
+              >
+                用 AI 解释
+              </button>
+            )}
+          </section>
+        )}
+
         {main && (
           <section className="primary-definition">
             <div className="dictionary-label">

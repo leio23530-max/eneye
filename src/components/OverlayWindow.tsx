@@ -161,6 +161,31 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     await invoke("set_overlay_pinned", { pinned: value });
   }
 
+  function explainWord(word: string) {
+    const requestId = crypto.randomUUID();
+    currentRequest.current = requestId;
+    setLookup(null);
+    setTranslation({
+      requestId,
+      text: word,
+      status: "streaming",
+      output: "",
+    });
+    translateSelection({
+      requestId,
+      text: word,
+      sourceLanguage: settings.sourceLanguage,
+      targetLanguage: settings.targetLanguage,
+      source: "uia",
+    }).catch((error) => {
+      setTranslation((current) =>
+        current
+          ? { ...current, status: "error", error: String(error) }
+          : current,
+      );
+    });
+  }
+
   function retryTranslation() {
     if (!translation) return;
     const requestId = crypto.randomUUID();
@@ -193,6 +218,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
         <OverlayCard
           key={lookup.normalizedWord}
           onClose={() => void hide()}
+          onExplain={explainWord}
           onPinChange={(value) => void changePinned(value)}
           settings={settings}
           lookup={lookup}

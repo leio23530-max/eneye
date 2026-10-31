@@ -2372,3 +2372,20 @@ select {
   line-height: 1.35;
   white-space: nowrap;
 }
+
+.empty-definition {
+  padding: 18px;
+}
+
+.empty-definition-title {
+  font-family: var(--headword-font);
+  font-size: 22px;
+  margin: 4px 0 8px;
+}
+
+.empty-definition-text {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 14px;
+}
