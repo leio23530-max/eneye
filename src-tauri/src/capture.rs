@@ -583,7 +583,7 @@ fn captures_escape(mode: OverlayMode) -> bool {
     mode == OverlayMode::Translation
 }
 
-fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
+pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
     const WIDTH: i32 = 440;
     const HEIGHT: i32 = 610;
     const GAP: i32 = 12;
