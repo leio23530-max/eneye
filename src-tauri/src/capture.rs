@@ -1103,6 +1103,19 @@ fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
             candidates.push(word);
         }
         candidates.extend(ocr_spelling_variants(raw));
+        if raw.contains(['"', '“', '”']) {
+            for segment in raw.split(|character: char| {
+                !character.is_ascii_alphabetic() && character != '\'' && character != '-'
+            }) {
+                if segment.is_empty() {
+                    continue;
+                }
+                if let Ok(word) = clean_lookup_word(segment) {
+                    candidates.push(word);
+                }
+                candidates.extend(ocr_spelling_variants(segment));
+            }
+        }
     }
     candidates.dedup();
     Ok(candidates)
@@ -1113,29 +1126,52 @@ fn ocr_word_candidates_at(_x: i32, _y: i32) -> anyhow::Result<Vec<String>> {
     Ok(Vec::new())
 }
 
+fn push_ocr_variant(variants: &mut Vec<String>, characters: &[char]) {
+    if variants.len() >= 128 {
+        return;
+    }
+    let candidate = characters.iter().collect::<String>();
+    if let Ok(word) = clean_lookup_word(&candidate)
+        && !variants.contains(&word)
+    {
+        variants.push(word);
+    }
+}
+
 fn ocr_spelling_variants(text: &str) -> Vec<String> {
     let characters = text.chars().collect::<Vec<_>>();
+    let options = characters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, character)| {
+            let replacements: &[char] = match character {
+                '1' => &['l', 'i'],
+                'l' | 'L' => &['i'],
+                'i' | 'I' => &['l'],
+                '0' => &['o'],
+                '5' | 'S' => &['s'],
+                _ => &[],
+            };
+            (!replacements.is_empty()).then(|| (index, replacements.to_vec()))
+        })
+        .collect::<Vec<_>>();
     let mut variants = Vec::new();
-    for (index, character) in characters.iter().enumerate() {
-        let replacements: &[char] = match character {
-            '1' => &['l', 'i'],
-            'l' | 'L' => &['i'],
-            'i' | 'I' => &['l'],
-            '0' => &['o'],
-            '5' | 'S' => &['s'],
-            _ => &[],
-        };
+    for (index, replacements) in &options {
         for replacement in replacements {
-            if *replacement == *character {
-                continue;
-            }
             let mut candidate = characters.clone();
-            candidate[index] = *replacement;
-            let candidate = candidate.into_iter().collect::<String>();
-            if let Ok(word) = clean_lookup_word(&candidate)
-                && !variants.contains(&word)
-            {
-                variants.push(word);
+            candidate[*index] = *replacement;
+            push_ocr_variant(&mut variants, &candidate);
+        }
+    }
+    for left in 0..options.len() {
+        for right in (left + 1)..options.len() {
+            for left_replacement in &options[left].1 {
+                for right_replacement in &options[right].1 {
+                    let mut candidate = characters.clone();
+                    candidate[options[left].0] = *left_replacement;
+                    candidate[options[right].0] = *right_replacement;
+                    push_ocr_variant(&mut variants, &candidate);
+                }
             }
         }
     }
@@ -1459,6 +1495,11 @@ mod tests {
             ocr_spelling_variants("1ess")
                 .iter()
                 .any(|word| word == "less")
+        );
+        assert!(
+            ocr_spelling_variants("1lnear")
+                .iter()
+                .any(|word| word == "linear")
         );
     }
 
