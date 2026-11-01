@@ -12,6 +12,7 @@ pub struct AppSettings {
     pub lookup_delay_ms: u64,
     pub word_card_linger_ms: u64,
     pub overlay_offset_px: u64,
+    pub ai_translation_enabled: bool,
     pub auto_translate: bool,
     pub launch_at_startup: bool,
     pub headword_font: String,
@@ -58,6 +59,7 @@ impl Default for AppSettings {
             lookup_delay_ms: 240,
             word_card_linger_ms: 1500,
             overlay_offset_px: 20,
+            ai_translation_enabled: true,
             auto_translate: true,
             launch_at_startup: false,
             headword_font: "Georgia".into(),
@@ -249,6 +251,7 @@ mod tests {
         assert_eq!(settings.lookup_delay_ms, 240);
         assert_eq!(settings.word_card_linger_ms, 1500);
         assert_eq!(settings.overlay_offset_px, 20);
+        assert!(settings.ai_translation_enabled);
         assert_eq!(settings.target_language, "简体中文");
         assert_eq!(settings.ai_base_url, "https://api.deepseek.com");
         assert_eq!(settings.ai_connection_name, "API");

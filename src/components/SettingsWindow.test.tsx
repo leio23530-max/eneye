@@ -58,6 +58,18 @@ afterEach(() => {
 });
 
 describe("SettingsWindow", () => {
+  it("turns the AI translation master switch off from the AI page", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("button", { name: "AI 翻译" }));
+    const master = screen.getByRole("switch", { name: "启用 AI 翻译" });
+    expect(master).toHaveAttribute("aria-checked", "true");
+
+    await user.click(master);
+    expect(master).toHaveAttribute("aria-checked", "false");
+  });
+
   it("uses both capture-feel sliders in the hover preview", () => {
     vi.useFakeTimers();
     render(<Harness />);

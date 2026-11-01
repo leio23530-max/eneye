@@ -412,6 +412,17 @@ async fn translate_selection(
         .lock()
         .map_err(|_| "settings lock is poisoned".to_owned())?
         .clone();
+    if !settings.ai_translation_enabled {
+        let message = "AI 翻译已关闭".to_owned();
+        let _ = app.emit(
+            "eneye://translation",
+            TranslationEvent::Failed {
+                request_id: request.request_id.clone(),
+                error: message.clone(),
+            },
+        );
+        return Err(message);
+    }
     if settings.translation_model().is_empty() {
         let message = "请先选择或填写 AI 模型名称".to_owned();
         let _ = app.emit(

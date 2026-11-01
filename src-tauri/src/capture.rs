@@ -821,7 +821,7 @@ fn show_translation_for_text(
         .lock()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    if !settings.auto_translate {
+    if !settings.ai_translation_enabled || !settings.auto_translate {
         return;
     }
     hide_overlay(app);
