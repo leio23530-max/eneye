@@ -346,59 +346,54 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     }
                     let ocr_started = Instant::now();
                     match ocr_word_candidates_at(x, y) {
-                        Ok(candidates) if !candidates.is_empty() => {
+                        Ok(mut candidates) => {
+                            let mut best_word = best_ocr_word(&app, &candidates);
+                            if best_word.is_none()
+                                && let Ok(cleaned) = ocr_word_candidates_at_clean(x, y)
+                            {
+                                candidates.extend(cleaned);
+                                candidates.dedup();
+                                best_word = best_ocr_word(&app, &candidates);
+                            }
                             if !cursor_still_matches(pointer) {
                                 if !keeps_existing_card(&app) {
                                     hide_overlay(&app);
                                 }
                                 continue;
                             }
-                            let mut best_word: Option<String> = None;
-                            for candidate in &candidates {
-                                let Some(result) = find_lookup(&app, candidate, "ocr") else {
-                                    continue;
-                                };
-                                if result.entries.is_empty() {
-                                    continue;
-                                }
-                                if best_word
+                            if candidates.is_empty() {
+                                word_probe::update_ocr_stage(
+                                    &mut report,
+                                    false,
+                                    ocr_started.elapsed(),
+                                    "OCR 未识别到鼠标下的英文单词".into(),
+                                );
+                                None
+                            } else {
+                                let mut word = best_word
+                                    .or_else(|| candidates.last().cloned())
+                                    .unwrap_or_default();
+                                let mut lookup_result = lookup(&app, &word, "ocr");
+                                if lookup_result
                                     .as_ref()
-                                    .is_none_or(|current| candidate.len() > current.len())
+                                    .is_none_or(|result| result.entries.is_empty())
+                                    && let Some(corrected) =
+                                        correct_ocr_word_from_title(&word, x, y)
+                                    && corrected != word.to_ascii_lowercase()
                                 {
-                                    best_word = Some(candidate.clone());
+                                    word = corrected;
+                                    lookup_result = lookup(&app, &word, "ocr");
                                 }
+                                word_probe::update_ocr_stage(
+                                    &mut report,
+                                    true,
+                                    ocr_started.elapsed(),
+                                    format!("命中 {word}"),
+                                );
+                                report.word = Some(word.clone());
+                                report.source = Some("ocr".into());
+                                lookup_result
                             }
-                            let mut word = best_word
-                                .or_else(|| candidates.last().cloned())
-                                .unwrap_or_default();
-                            let mut lookup_result = lookup(&app, &word, "ocr");
-                            if lookup_result
-                                .as_ref()
-                                .is_none_or(|result| result.entries.is_empty())
-                                && let Some(corrected) = correct_ocr_word_from_title(&word, x, y)
-                                && corrected != word.to_ascii_lowercase()
-                            {
-                                word = corrected;
-                                lookup_result = lookup(&app, &word, "ocr");
-                            }
-                            word_probe::update_ocr_stage(
-                                &mut report,
-                                true,
-                                ocr_started.elapsed(),
-                                format!("命中 {word}"),
-                            );
-                            report.word = Some(word.clone());
-                            report.source = Some("ocr".into());
-                            lookup_result
-                        }
-                        Ok(_) => {
-                            word_probe::update_ocr_stage(
-                                &mut report,
-                                false,
-                                ocr_started.elapsed(),
-                                "OCR 未识别到鼠标下的英文单词".into(),
-                            );
-                            None
                         }
                         Err(error) => {
                             word_probe::update_ocr_stage(
@@ -1049,10 +1044,11 @@ fn should_start_leave_timer(
 
 #[cfg(windows)]
 fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
-    let candidates = ocr_word_candidates_at_with(x, y, false)?;
-    if !candidates.is_empty() {
-        return Ok(candidates);
-    }
+    ocr_word_candidates_at_with(x, y, false)
+}
+
+#[cfg(windows)]
+fn ocr_word_candidates_at_clean(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
     ocr_word_candidates_at_with(x, y, true)
 }
 
