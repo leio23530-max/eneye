@@ -60,6 +60,15 @@ enum HoverCandidate {
     Ocr { x: i32, y: i32 },
 }
 
+struct OcrCompletion {
+    generation: u64,
+    point: (i32, i32),
+    started: Instant,
+    report: WordProbeReport,
+    candidates: Vec<String>,
+    error: Option<String>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionPayload {
@@ -140,8 +149,35 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
         let mut resolved_for_dwell = false;
         let mut leave_since: Option<Instant> = None;
         let mut applied_offset = overlay_offset(&app);
+        let (ocr_sender, ocr_receiver) = mpsc::channel::<OcrCompletion>();
+        let mut ocr_generation = 0_u64;
 
         loop {
+            while let Ok(completion) = ocr_receiver.try_recv() {
+                if completion.generation != ocr_generation
+                    || !cursor_still_matches(completion.point)
+                {
+                    continue;
+                }
+                let mut report = completion.report;
+                let result = resolve_ocr(
+                    &app,
+                    &mut report,
+                    completion.point,
+                    completion.started,
+                    completion.candidates,
+                    completion.error,
+                );
+                store_probe_report(&app, &report);
+                if let Some(result) = result {
+                    leave_since = None;
+                    show_lookup(&app, result, pointer);
+                } else if !keeps_existing_card(&app) {
+                    hide_overlay(&app);
+                }
+                preflight = None;
+            }
+
             let current_offset = overlay_offset(&app);
             if current_offset != applied_offset {
                 applied_offset = current_offset;
@@ -163,6 +199,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                         stable_since = Instant::now();
                         preflight = None;
                         resolved_for_dwell = false;
+                        ocr_generation = ocr_generation.wrapping_add(1);
                     } else {
                         pointer = (x, y);
                     }
@@ -195,6 +232,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     stable_since = Instant::now();
                     preflight = None;
                     resolved_for_dwell = false;
+                    ocr_generation = ocr_generation.wrapping_add(1);
                 }
                 Ok(MouseInput {
                     kind: MouseInputKind::Up,
@@ -344,67 +382,48 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                         }
                         continue;
                     }
-                    let ocr_started = Instant::now();
-                    match ocr_word_candidates_at(x, y) {
-                        Ok(mut candidates) => {
-                            let mut best_word = best_ocr_word(&app, &candidates);
-                            if best_word.is_none()
-                                && let Ok(cleaned) = ocr_word_candidates_at_clean(x, y)
-                            {
-                                candidates.extend(cleaned);
-                                candidates.dedup();
-                                best_word = best_ocr_word(&app, &candidates);
-                            }
-                            if !cursor_still_matches(pointer) {
-                                if !keeps_existing_card(&app) {
-                                    hide_overlay(&app);
+                    let generation = ocr_generation;
+                    let sender = ocr_sender.clone();
+                    let thread_app = app.clone();
+                    let thread_report = report.clone();
+                    let spawn = thread::Builder::new()
+                        .name("eneye-ocr".into())
+                        .spawn(move || {
+                            let started = Instant::now();
+                            let (candidates, error) = match ocr_word_candidates_at(x, y) {
+                                Ok(mut candidates) => {
+                                    if best_ocr_word(&thread_app, &candidates).is_none()
+                                        && let Ok(cleaned) = ocr_word_candidates_at_clean(x, y)
+                                    {
+                                        candidates.extend(cleaned);
+                                        candidates.dedup();
+                                    }
+                                    (candidates, None)
                                 }
-                                continue;
-                            }
-                            if candidates.is_empty() {
-                                word_probe::update_ocr_stage(
-                                    &mut report,
-                                    false,
-                                    ocr_started.elapsed(),
-                                    "OCR 未识别到鼠标下的英文单词".into(),
-                                );
-                                None
-                            } else {
-                                let mut word = best_word
-                                    .or_else(|| candidates.last().cloned())
-                                    .unwrap_or_default();
-                                let mut lookup_result = lookup(&app, &word, "ocr");
-                                if lookup_result
-                                    .as_ref()
-                                    .is_none_or(|result| result.entries.is_empty())
-                                    && let Some(corrected) =
-                                        correct_ocr_word_from_title(&word, x, y)
-                                    && corrected != word.to_ascii_lowercase()
-                                {
-                                    word = corrected;
-                                    lookup_result = lookup(&app, &word, "ocr");
-                                }
-                                word_probe::update_ocr_stage(
-                                    &mut report,
-                                    true,
-                                    ocr_started.elapsed(),
-                                    format!("命中 {word}"),
-                                );
-                                report.word = Some(word.clone());
-                                report.source = Some("ocr".into());
-                                lookup_result
-                            }
-                        }
-                        Err(error) => {
-                            word_probe::update_ocr_stage(
-                                &mut report,
-                                false,
-                                ocr_started.elapsed(),
-                                error.to_string(),
-                            );
-                            None
+                                Err(error) => (Vec::new(), Some(error.to_string())),
+                            };
+                            let _ = sender.send(OcrCompletion {
+                                generation,
+                                point: (x, y),
+                                started,
+                                report: thread_report,
+                                candidates,
+                                error,
+                            });
+                        });
+                    if let Err(error) = spawn {
+                        word_probe::update_ocr_stage(
+                            &mut report,
+                            false,
+                            Duration::ZERO,
+                            format!("OCR 线程启动失败: {error}"),
+                        );
+                        store_probe_report(&app, &report);
+                        if !keeps_existing_card(&app) {
+                            hide_overlay(&app);
                         }
                     }
+                    continue;
                 }
             };
             if !cursor_still_matches(pointer) {
@@ -429,6 +448,47 @@ fn store_probe_report(app: &tauri::AppHandle, report: &WordProbeReport) {
     if let Ok(mut last_probe) = app.state::<AppState>().last_word_probe.lock() {
         *last_probe = report.clone();
     }
+}
+
+fn resolve_ocr(
+    app: &tauri::AppHandle,
+    report: &mut WordProbeReport,
+    point: (i32, i32),
+    started: Instant,
+    candidates: Vec<String>,
+    error: Option<String>,
+) -> Option<crate::models::LookupResult> {
+    report.total_ms = started.elapsed().as_millis() as u64;
+    if let Some(error) = error {
+        word_probe::update_ocr_stage(report, false, started.elapsed(), error);
+        return None;
+    }
+    if candidates.is_empty() {
+        word_probe::update_ocr_stage(
+            report,
+            false,
+            started.elapsed(),
+            "OCR 未识别到鼠标下的英文单词".into(),
+        );
+        return None;
+    }
+    let mut word = best_ocr_word(app, &candidates)
+        .or_else(|| candidates.last().cloned())
+        .unwrap_or_default();
+    let mut lookup_result = lookup(app, &word, "ocr");
+    if lookup_result
+        .as_ref()
+        .is_none_or(|result| result.entries.is_empty())
+        && let Some(corrected) = correct_ocr_word_from_title(&word, point.0, point.1)
+        && corrected != word.to_ascii_lowercase()
+    {
+        word = corrected;
+        lookup_result = lookup(app, &word, "ocr");
+    }
+    word_probe::update_ocr_stage(report, true, started.elapsed(), format!("命中 {word}"));
+    report.word = Some(word);
+    report.source = Some("ocr".into());
+    lookup_result
 }
 
 fn find_lookup(
