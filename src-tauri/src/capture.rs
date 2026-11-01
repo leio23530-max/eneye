@@ -1049,13 +1049,32 @@ fn should_start_leave_timer(
 
 #[cfg(windows)]
 fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
+    let candidates = ocr_word_candidates_at_with(x, y, false)?;
+    if !candidates.is_empty() {
+        return Ok(candidates);
+    }
+    ocr_word_candidates_at_with(x, y, true)
+}
+
+#[cfg(windows)]
+fn ocr_word_candidates_at_with(
+    x: i32,
+    y: i32,
+    strip_small_glyphs: bool,
+) -> anyhow::Result<Vec<String>> {
     use uiautomation::{screenshots::Screenshot, types::Rect};
 
     const OCR_SCALE: u32 = 2;
     let left = (x - 600).max(0);
     let rect = Rect::new(left, y - 80, x + 220, y + 80);
     let screenshot = Screenshot::capture_rect(rect)?;
-    let bmp = upscale_ocr_bitmap(&screenshot.to_bmp_bytes(), OCR_SCALE)?;
+    let raw = screenshot.to_bmp_bytes();
+    let raw = if strip_small_glyphs {
+        strip_small_ocr_glyphs(&raw)?
+    } else {
+        raw
+    };
+    let bmp = upscale_ocr_bitmap(&raw, OCR_SCALE)?;
     let result = recognize_bmp(&bmp)?;
     let mut lines: Vec<(String, Vec<String>)> = Vec::new();
     let mut selected = None;
@@ -1385,6 +1404,89 @@ fn upscale_ocr_bitmap(bytes: &[u8], scale: u32) -> anyhow::Result<Vec<u8>> {
     );
     let mut output = Cursor::new(Vec::new());
     resized.write_to(&mut output, ImageFormat::Bmp)?;
+    Ok(output.into_inner())
+}
+
+fn strip_small_ocr_glyphs(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use image::{DynamicImage, ImageFormat, Luma};
+    use std::io::Cursor;
+
+    let source = image::load_from_memory_with_format(bytes, ImageFormat::Bmp)?.to_luma8();
+    let (width, height) = source.dimensions();
+    if width < 4 || height < 4 {
+        return Ok(bytes.to_vec());
+    }
+    let mut gray = source;
+    let mean = gray.as_raw().iter().map(|value| *value as u64).sum::<u64>()
+        / (width as u64 * height as u64);
+    if mean < 128 {
+        for value in gray.as_mut() {
+            *value = 255 - *value;
+        }
+    }
+
+    let mut foreground = vec![false; (width * height) as usize];
+    for (index, value) in gray.as_raw().iter().enumerate() {
+        foreground[index] = *value < 160;
+    }
+    let mut visited = vec![false; foreground.len()];
+    let mut components = Vec::new();
+    for start in 0..foreground.len() {
+        if !foreground[start] || visited[start] {
+            continue;
+        }
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut pixels = Vec::new();
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0, usize::MAX, 0);
+        while let Some(index) = stack.pop() {
+            pixels.push(index);
+            let x = index % width as usize;
+            let y = index / width as usize;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            for dy in -1_i32..=1 {
+                for dx in -1_i32..=1 {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                        continue;
+                    }
+                    let neighbor = ny as usize * width as usize + nx as usize;
+                    if foreground[neighbor] && !visited[neighbor] {
+                        visited[neighbor] = true;
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+        components.push((max_y - min_y + 1, max_x - min_x + 1, pixels.len(), pixels));
+    }
+    let text_height = components
+        .iter()
+        .filter(|(_, _, area, _)| *area >= 8)
+        .map(|(height, _, _, _)| *height)
+        .max()
+        .unwrap_or(0);
+    if text_height == 0 {
+        return Ok(bytes.to_vec());
+    }
+    for (component_height, component_width, area, pixels) in components {
+        if component_height < text_height * 62 / 100
+            && component_width < text_height * 70 / 100
+            && area < text_height * text_height * 35 / 100
+        {
+            for index in pixels {
+                let x = (index % width as usize) as u32;
+                let y = (index / width as usize) as u32;
+                gray.put_pixel(x, y, Luma([255]));
+            }
+        }
+    }
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageLuma8(gray).write_to(&mut output, ImageFormat::Bmp)?;
     Ok(output.into_inner())
 }
 
