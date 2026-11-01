@@ -1098,11 +1098,11 @@ fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
             next_words,
         ));
     }
-    if let Some(word) = words
-        .get(word_index)
-        .and_then(|word| clean_lookup_word(word).ok())
-    {
-        candidates.push(word);
+    if let Some(raw) = words.get(word_index) {
+        if let Ok(word) = clean_lookup_word(raw) {
+            candidates.push(word);
+        }
+        candidates.extend(ocr_spelling_variants(raw));
     }
     candidates.dedup();
     Ok(candidates)
@@ -1111,6 +1111,35 @@ fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
 #[cfg(not(windows))]
 fn ocr_word_candidates_at(_x: i32, _y: i32) -> anyhow::Result<Vec<String>> {
     Ok(Vec::new())
+}
+
+fn ocr_spelling_variants(text: &str) -> Vec<String> {
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut variants = Vec::new();
+    for (index, character) in characters.iter().enumerate() {
+        let replacements: &[char] = match character {
+            '1' => &['l', 'i'],
+            'l' | 'L' => &['i'],
+            'i' | 'I' => &['l'],
+            '0' => &['o'],
+            '5' | 'S' => &['s'],
+            _ => &[],
+        };
+        for replacement in replacements {
+            if *replacement == *character {
+                continue;
+            }
+            let mut candidate = characters.clone();
+            candidate[index] = *replacement;
+            let candidate = candidate.into_iter().collect::<String>();
+            if let Ok(word) = clean_lookup_word(&candidate)
+                && !variants.contains(&word)
+            {
+                variants.push(word);
+            }
+        }
+    }
+    variants
 }
 
 fn letters_fragment(text: &str) -> String {
@@ -1418,6 +1447,20 @@ fn run_mouse_hook() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrects_common_ocr_l_i_1_confusions() {
+        assert!(
+            ocr_spelling_variants("llnear")
+                .iter()
+                .any(|word| word == "linear")
+        );
+        assert!(
+            ocr_spelling_variants("1ess")
+                .iter()
+                .any(|word| word == "less")
+        );
+    }
 
     #[test]
     fn only_joins_words_adjacent_to_a_trailing_hyphen() {
