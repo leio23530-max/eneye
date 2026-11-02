@@ -1135,11 +1135,12 @@ fn ocr_word_candidates_at_with(
     };
     let bmp = upscale_ocr_bitmap(&raw, OCR_SCALE)?;
     let result = recognize_bmp(&bmp)?;
-    let mut lines: Vec<(String, Vec<String>)> = Vec::new();
+    let mut lines: Vec<(String, Vec<String>, Vec<windows::Foundation::Rect>)> = Vec::new();
     let mut selected = None;
     for line in result.Lines()? {
         let line_text = line.Text()?.to_string();
         let mut words = Vec::new();
+        let mut bounds_list = Vec::new();
         for word in line.Words()? {
             let bounds = word.BoundingRect()?;
             if selected.is_none()
@@ -1155,19 +1156,20 @@ fn ocr_word_candidates_at_with(
                 selected = Some((lines.len(), words.len()));
             }
             words.push(word.Text()?.to_string());
+            bounds_list.push(bounds);
         }
-        lines.push((line_text, words));
+        lines.push((line_text, words, bounds_list));
     }
 
     let Some((line_index, word_index)) = selected else {
         return Ok(Vec::new());
     };
-    let (line_text, words) = &lines[line_index];
+    let (line_text, words, bounds) = &lines[line_index];
     let mut candidates = Vec::new();
     let line_has_hyphen = line_text.contains('-') || words.iter().any(|word| word.contains('-'));
     if line_has_hyphen
         && let Some(hyphen_index) = adjacent_hyphen_index(words, word_index)
-        && let Some((_, next_words)) = lines.get(line_index + 1)
+        && let Some((_, next_words, _)) = lines.get(line_index + 1)
     {
         candidates.extend(hyphenated_candidates(
             words,
@@ -1182,6 +1184,7 @@ fn ocr_word_candidates_at_with(
         }
         candidates.extend(ocr_spelling_variants(raw));
         candidates.extend(ocr_boundary_trim_variants(raw));
+        candidates.extend(ocr_fragment_candidates(words, bounds, word_index));
         if raw.contains(['"', '“', '”']) {
             for segment in raw.split(|character: char| {
                 !character.is_ascii_alphabetic() && character != '\'' && character != '-'
@@ -1256,6 +1259,67 @@ fn ocr_spelling_variants(text: &str) -> Vec<String> {
         }
     }
     variants
+}
+
+fn push_ocr_candidate(candidates: &mut Vec<String>, text: &str) {
+    if let Ok(word) = clean_lookup_word(text)
+        && !candidates.contains(&word)
+    {
+        candidates.push(word);
+    }
+    for word in ocr_spelling_variants(text)
+        .into_iter()
+        .chain(ocr_boundary_trim_variants(text))
+    {
+        if !candidates.contains(&word) {
+            candidates.push(word);
+        }
+    }
+}
+
+fn ocr_fragment_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '\'' || *character == '-'
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn ocr_fragment_candidates(
+    words: &[String],
+    bounds: &[windows::Foundation::Rect],
+    selected: usize,
+) -> Vec<String> {
+    if selected >= words.len() || selected >= bounds.len() {
+        return Vec::new();
+    }
+    let height = bounds[selected].Height.max(1.0);
+    let limit = height * 0.35;
+    let mut candidates = Vec::new();
+    let mut merged = ocr_fragment_text(&words[selected]);
+    let mut index = selected;
+    while index + 1 < words.len() && index + 1 < bounds.len() && index < selected + 2 {
+        let gap = bounds[index + 1].X - (bounds[index].X + bounds[index].Width);
+        if gap > limit {
+            break;
+        }
+        merged.push_str(&ocr_fragment_text(&words[index + 1]));
+        push_ocr_candidate(&mut candidates, &merged);
+        index += 1;
+    }
+    let mut merged = ocr_fragment_text(&words[selected]);
+    let mut index = selected;
+    while index > 0 && index - 1 < bounds.len() && selected - index < 2 {
+        let gap = bounds[index].X - (bounds[index - 1].X + bounds[index - 1].Width);
+        if gap > limit {
+            break;
+        }
+        merged = format!("{}{}", ocr_fragment_text(&words[index - 1]), merged);
+        push_ocr_candidate(&mut candidates, &merged);
+        index -= 1;
+    }
+    candidates
 }
 
 fn ocr_edge_noise(character: char) -> bool {
@@ -1695,6 +1759,56 @@ fn run_mouse_hook() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_adjacent_ocr_fragments() {
+        let words = ["\"wa", "r", "0", "n", "pollution\""]
+            .iter()
+            .map(|word| word.to_string())
+            .collect::<Vec<_>>();
+        let bounds = vec![
+            windows::Foundation::Rect {
+                X: 762.0,
+                Y: 355.0,
+                Width: 106.0,
+                Height: 50.0,
+            },
+            windows::Foundation::Rect {
+                X: 880.0,
+                Y: 369.0,
+                Width: 30.0,
+                Height: 36.0,
+            },
+            windows::Foundation::Rect {
+                X: 953.0,
+                Y: 369.0,
+                Width: 33.0,
+                Height: 36.0,
+            },
+            windows::Foundation::Rect {
+                X: 994.0,
+                Y: 369.0,
+                Width: 29.0,
+                Height: 36.0,
+            },
+            windows::Foundation::Rect {
+                X: 1070.0,
+                Y: 354.0,
+                Width: 379.0,
+                Height: 65.0,
+            },
+        ];
+        assert!(
+            ocr_fragment_candidates(&words, &bounds, 0)
+                .iter()
+                .any(|word| word == "war")
+        );
+        assert!(
+            ocr_fragment_candidates(&words, &bounds, 2)
+                .iter()
+                .any(|word| word == "on")
+        );
+    }
 
     #[test]
     fn corrects_ocr_x_for_i_and_edge_quote_noise() {
