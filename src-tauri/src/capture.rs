@@ -392,7 +392,10 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                             let started = Instant::now();
                             let (candidates, error) = match ocr_word_candidates_at(x, y) {
                                 Ok(mut candidates) => {
-                                    if best_ocr_word(&thread_app, &candidates).is_none()
+                                    let best = best_ocr_word(&thread_app, &candidates);
+                                    let retry_cleaned =
+                                        best.as_ref().is_none_or(|word| word.chars().count() <= 3);
+                                    if retry_cleaned
                                         && let Ok(cleaned) = ocr_word_candidates_at_clean(x, y)
                                     {
                                         candidates.extend(cleaned);
@@ -1178,6 +1181,7 @@ fn ocr_word_candidates_at_with(
             candidates.push(word);
         }
         candidates.extend(ocr_spelling_variants(raw));
+        candidates.extend(ocr_boundary_trim_variants(raw));
         if raw.contains(['"', '“', '”']) {
             for segment in raw.split(|character: char| {
                 !character.is_ascii_alphabetic() && character != '\'' && character != '-'
@@ -1225,6 +1229,7 @@ fn ocr_spelling_variants(text: &str) -> Vec<String> {
                 'i' | 'I' => &['l'],
                 '0' => &['o'],
                 '5' | 'S' => &['s'],
+                'x' | 'X' => &['i'],
                 _ => &[],
             };
             (!replacements.is_empty()).then(|| (index, replacements.to_vec()))
@@ -1248,6 +1253,55 @@ fn ocr_spelling_variants(text: &str) -> Vec<String> {
                     push_ocr_variant(&mut variants, &candidate);
                 }
             }
+        }
+    }
+    variants
+}
+
+fn ocr_edge_noise(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '“' | '”' | '‘' | '’' | 'C' | 'c' | 'x' | 'X' | '1' | '|'
+    )
+}
+
+fn ocr_boundary_trim_variants(text: &str) -> Vec<String> {
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut variants = Vec::new();
+    for count in 1..=2 {
+        if characters.len() < count + 3 {
+            break;
+        }
+        if !characters[..count]
+            .iter()
+            .all(|character| ocr_edge_noise(*character))
+        {
+            break;
+        }
+        let candidate = characters[count..].iter().collect::<String>();
+        if let Ok(word) = clean_lookup_word(&candidate)
+            && !variants.contains(&word)
+        {
+            variants.push(word);
+        }
+    }
+    for count in 1..=2 {
+        if characters.len() < count + 3 {
+            break;
+        }
+        if !characters[characters.len() - count..]
+            .iter()
+            .all(|character| ocr_edge_noise(*character))
+        {
+            break;
+        }
+        let candidate = characters[..characters.len() - count]
+            .iter()
+            .collect::<String>();
+        if let Ok(word) = clean_lookup_word(&candidate)
+            && !variants.contains(&word)
+        {
+            variants.push(word);
         }
     }
     variants
@@ -1641,6 +1695,20 @@ fn run_mouse_hook() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrects_ocr_x_for_i_and_edge_quote_noise() {
+        assert!(
+            ocr_spelling_variants("mxning")
+                .iter()
+                .any(|word| word == "mining")
+        );
+        assert!(
+            ocr_boundary_trim_variants("CCurban")
+                .iter()
+                .any(|word| word == "urban")
+        );
+    }
 
     #[test]
     fn corrects_common_ocr_l_i_1_confusions() {
