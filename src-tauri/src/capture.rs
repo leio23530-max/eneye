@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     sync::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -12,6 +13,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
+use crate::recognition::{
+    self, GeneratedCandidate, OcrBox, OcrToken, RecognitionCandidate, WordEvidence,
+};
 use crate::word_probe::{self, WordProbeReport};
 use crate::{AppState, TranslationRequest, dictionary::clean_lookup_word, translate_selection};
 
@@ -65,7 +69,7 @@ struct OcrCompletion {
     point: (i32, i32),
     started: Instant,
     report: WordProbeReport,
-    candidates: Vec<String>,
+    candidates: Vec<GeneratedCandidate>,
     error: Option<String>,
 }
 
@@ -319,15 +323,34 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                 if let Some((uia_text, _)) = accessible.word.clone()
                     && ocr_available()
                     && let Ok(candidates) = ocr_word_candidates_at(pointer.0, pointer.1)
-                    && let Some(ocr_word) = best_ocr_word(&app, &candidates)
                 {
-                    let uia_lower = uia_text.to_lowercase();
-                    let ocr_lower = ocr_word.to_lowercase();
-                    let uia_has_punctuation = uia_lower.contains('\'') || uia_lower.contains('-');
-                    let ocr_extends = ocr_lower.chars().count() > uia_lower.chars().count()
-                        && ocr_lower.starts_with(&uia_lower);
-                    if ocr_lower != uia_lower && (!uia_has_punctuation || ocr_extends) {
-                        accessible.word = Some((ocr_word, "ocr"));
+                    let ranked = rank_ocr_candidates(&app, &candidates);
+                    let best = recognition::choose_best(ranked.clone());
+                    accessible.report.candidates = ranked;
+                    if let Some(best) = best {
+                        let uia_lower = uia_text.to_lowercase();
+                        let ocr_lower = best.text.to_lowercase();
+                        let uia_has_punctuation = uia_lower.chars().any(|character| {
+                            !character.is_ascii_alphabetic()
+                                && character != '\''
+                                && character != '-'
+                        });
+                        let ocr_extends = ocr_lower.chars().count() > uia_lower.chars().count()
+                            && ocr_lower.starts_with(&uia_lower);
+                        let uia_evidence = dictionary_evidence(&app, &uia_text);
+                        let uia_needs_help =
+                            !uia_evidence.dictionary_hit && uia_lower.chars().count() > 1;
+                        let confident = best.confidence >= 0.80 && best.dictionary_hit;
+                        if ocr_lower != uia_lower
+                            && (!uia_has_punctuation || ocr_extends)
+                            && (ocr_extends || (uia_needs_help && confident))
+                        {
+                            accessible.word = Some((best.text.clone(), "ocr"));
+                            accessible.report.word = Some(best.text.clone());
+                            accessible.report.source = Some("ocr".into());
+                            accessible.report.confidence = Some(best.confidence);
+                            accessible.report.reason = Some(best.reason.clone());
+                        }
                     }
                 }
 
@@ -384,27 +407,22 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     }
                     let generation = ocr_generation;
                     let sender = ocr_sender.clone();
-                    let thread_app = app.clone();
                     let thread_report = report.clone();
                     let spawn = thread::Builder::new()
                         .name("eneye-ocr".into())
                         .spawn(move || {
                             let started = Instant::now();
-                            let (candidates, error) = match ocr_word_candidates_at(x, y) {
-                                Ok(mut candidates) => {
-                                    let best = best_ocr_word(&thread_app, &candidates);
-                                    let retry_cleaned =
-                                        best.as_ref().is_none_or(|word| word.chars().count() <= 3);
-                                    if retry_cleaned
-                                        && let Ok(cleaned) = ocr_word_candidates_at_clean(x, y)
-                                    {
-                                        candidates.extend(cleaned);
-                                        candidates.dedup();
-                                    }
-                                    (candidates, None)
-                                }
+                            let (mut candidates, error) = match ocr_word_candidates_at(x, y) {
+                                Ok(candidates) => (candidates, None),
                                 Err(error) => (Vec::new(), Some(error.to_string())),
                             };
+                            let has_full_raw = candidates.iter().any(|candidate| {
+                                candidate.raw_exact && candidate.text.chars().count() >= 4
+                            });
+                            if !has_full_raw && let Ok(cleaned) = ocr_word_candidates_at_clean(x, y)
+                            {
+                                candidates.extend(cleaned);
+                            }
                             let _ = sender.send(OcrCompletion {
                                 generation,
                                 point: (x, y),
@@ -453,12 +471,31 @@ fn store_probe_report(app: &tauri::AppHandle, report: &WordProbeReport) {
     }
 }
 
+fn dictionary_evidence(app: &tauri::AppHandle, word: &str) -> WordEvidence {
+    app.state::<AppState>()
+        .dictionary
+        .lock()
+        .map(|dictionary| dictionary.evidence(word))
+        .unwrap_or_default()
+}
+
+fn rank_ocr_candidates(
+    app: &tauri::AppHandle,
+    generated: &[GeneratedCandidate],
+) -> Vec<RecognitionCandidate> {
+    let state = app.state::<AppState>();
+    let Ok(dictionary) = state.dictionary.lock() else {
+        return Vec::new();
+    };
+    recognition::rank_generated(generated, |text| dictionary.evidence(text))
+}
+
 fn resolve_ocr(
     app: &tauri::AppHandle,
     report: &mut WordProbeReport,
     point: (i32, i32),
     started: Instant,
-    candidates: Vec<String>,
+    candidates: Vec<GeneratedCandidate>,
     error: Option<String>,
 ) -> Option<crate::models::LookupResult> {
     report.total_ms = started.elapsed().as_millis() as u64;
@@ -475,9 +512,22 @@ fn resolve_ocr(
         );
         return None;
     }
-    let mut word = best_ocr_word(app, &candidates)
-        .or_else(|| candidates.last().cloned())
-        .unwrap_or_default();
+    let ranked = rank_ocr_candidates(app, &candidates);
+    report.candidates = ranked.clone();
+    let Some(best) = recognition::choose_best(ranked) else {
+        report.confidence = None;
+        report.reason = None;
+        word_probe::update_ocr_stage(
+            report,
+            false,
+            started.elapsed(),
+            "OCR 候选都不可靠，已隐藏".into(),
+        );
+        return None;
+    };
+    let confidence = best.confidence;
+    let reason = best.reason.clone();
+    let mut word = best.text;
     let mut lookup_result = lookup(app, &word, "ocr");
     if lookup_result
         .as_ref()
@@ -488,10 +538,32 @@ fn resolve_ocr(
         word = corrected;
         lookup_result = lookup(app, &word, "ocr");
     }
-    word_probe::update_ocr_stage(report, true, started.elapsed(), format!("命中 {word}"));
+    let Some(lookup_result) = lookup_result else {
+        report.word = None;
+        report.source = None;
+        report.confidence = Some(confidence);
+        report.reason = Some(format!("{reason}；候选不是可查询词，已隐藏"));
+        word_probe::update_ocr_stage(
+            report,
+            false,
+            started.elapsed(),
+            "候选不是可查询词，已隐藏".into(),
+        );
+        return None;
+    };
+    let known = !lookup_result.entries.is_empty();
+    let outcome = if known { "命中" } else { "识别" };
+    word_probe::update_ocr_stage(
+        report,
+        true,
+        started.elapsed(),
+        format!("{outcome} {word} · {:.0}%", confidence * 100.0),
+    );
     report.word = Some(word);
     report.source = Some("ocr".into());
-    lookup_result
+    report.confidence = Some(confidence);
+    report.reason = Some(reason);
+    Some(lookup_result)
 }
 
 fn find_lookup(
@@ -516,25 +588,6 @@ fn lookup(app: &tauri::AppHandle, word: &str, source: &str) -> Option<crate::mod
         let _ = storage.record_lookup(&result);
     }
     Some(result)
-}
-
-fn best_ocr_word(app: &tauri::AppHandle, candidates: &[String]) -> Option<String> {
-    let mut best: Option<String> = None;
-    for candidate in candidates {
-        let Some(result) = find_lookup(app, candidate, "ocr") else {
-            continue;
-        };
-        if result.entries.is_empty() {
-            continue;
-        }
-        if best
-            .as_ref()
-            .is_none_or(|current| candidate.len() > current.len())
-        {
-            best = Some(candidate.clone());
-        }
-    }
-    best
 }
 
 fn overlay_offset(app: &tauri::AppHandle) -> i32 {
@@ -1106,12 +1159,12 @@ fn should_start_leave_timer(
 }
 
 #[cfg(windows)]
-fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
+fn ocr_word_candidates_at(x: i32, y: i32) -> anyhow::Result<Vec<GeneratedCandidate>> {
     ocr_word_candidates_at_with(x, y, false)
 }
 
 #[cfg(windows)]
-fn ocr_word_candidates_at_clean(x: i32, y: i32) -> anyhow::Result<Vec<String>> {
+fn ocr_word_candidates_at_clean(x: i32, y: i32) -> anyhow::Result<Vec<GeneratedCandidate>> {
     ocr_word_candidates_at_with(x, y, true)
 }
 
@@ -1120,12 +1173,13 @@ fn ocr_word_candidates_at_with(
     x: i32,
     y: i32,
     strip_small_glyphs: bool,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<Vec<GeneratedCandidate>> {
     use uiautomation::{screenshots::Screenshot, types::Rect};
 
-    const OCR_SCALE: u32 = 2;
-    let left = (x - 600).max(0);
-    let rect = Rect::new(left, y - 80, x + 220, y + 80);
+    const OCR_SCALE: f32 = 2.0;
+    let left = x - 600;
+    let top = y - 80;
+    let rect = Rect::new(left, top, x + 220, y + 80);
     let screenshot = Screenshot::capture_rect(rect)?;
     let raw = screenshot.to_bmp_bytes();
     let raw = if strip_small_glyphs {
@@ -1133,298 +1187,52 @@ fn ocr_word_candidates_at_with(
     } else {
         raw
     };
-    let bmp = upscale_ocr_bitmap(&raw, OCR_SCALE)?;
+    let bmp = upscale_ocr_bitmap(&raw, OCR_SCALE as u32)?;
     let result = recognize_bmp(&bmp)?;
-    let mut lines: Vec<(String, Vec<String>, Vec<windows::Foundation::Rect>)> = Vec::new();
+    let mut lines: Vec<Vec<OcrToken>> = Vec::new();
     let mut selected = None;
     for line in result.Lines()? {
-        let line_text = line.Text()?.to_string();
-        let mut words = Vec::new();
-        let mut bounds_list = Vec::new();
+        let mut tokens = Vec::new();
         for word in line.Words()? {
             let bounds = word.BoundingRect()?;
-            if selected.is_none()
-                && point_in_ocr_word(
-                    x,
-                    y,
-                    rect.get_left(),
-                    rect.get_top(),
-                    &bounds,
-                    OCR_SCALE as f32,
-                )
-            {
-                selected = Some((lines.len(), words.len()));
+            let token = OcrToken {
+                text: word.Text()?.to_string(),
+                bounds: OcrBox {
+                    x: left as f32 + bounds.X / OCR_SCALE,
+                    y: top as f32 + bounds.Y / OCR_SCALE,
+                    width: bounds.Width / OCR_SCALE,
+                    height: bounds.Height / OCR_SCALE,
+                },
+            };
+            if selected.is_none() && token.bounds.contains_with_margin(x, y, 4.0) {
+                selected = Some((lines.len(), tokens.len()));
             }
-            words.push(word.Text()?.to_string());
-            bounds_list.push(bounds);
+            tokens.push(token);
         }
-        lines.push((line_text, words, bounds_list));
+        lines.push(tokens);
     }
 
     let Some((line_index, word_index)) = selected else {
         return Ok(Vec::new());
     };
-    let (line_text, words, bounds) = &lines[line_index];
-    let mut candidates = Vec::new();
-    let line_has_hyphen = line_text.contains('-') || words.iter().any(|word| word.contains('-'));
-    if line_has_hyphen
-        && let Some(hyphen_index) = adjacent_hyphen_index(words, word_index)
-        && let Some((_, next_words, _)) = lines.get(line_index + 1)
-    {
-        candidates.extend(hyphenated_candidates(
-            words,
-            word_index,
-            hyphen_index,
-            next_words,
-        ));
-    }
-    if let Some(raw) = words.get(word_index) {
-        if let Ok(word) = clean_lookup_word(raw) {
-            candidates.push(word);
-        }
-        candidates.extend(ocr_spelling_variants(raw));
-        candidates.extend(ocr_boundary_trim_variants(raw));
-        candidates.extend(ocr_fragment_candidates(words, bounds, word_index));
-        if raw.contains(['"', '“', '”']) {
-            for segment in raw.split(|character: char| {
-                !character.is_ascii_alphabetic() && character != '\'' && character != '-'
-            }) {
-                if segment.is_empty() {
-                    continue;
-                }
-                if let Ok(word) = clean_lookup_word(segment) {
-                    candidates.push(word);
-                }
-                candidates.extend(ocr_spelling_variants(segment));
-            }
-        }
-    }
-    candidates.dedup();
-    Ok(candidates)
+    let next_line = lines.get(line_index + 1).map(Vec::as_slice);
+    Ok(recognition::generate_ocr_candidates_at(
+        &lines[line_index],
+        word_index,
+        x,
+        y,
+        next_line,
+    ))
 }
 
 #[cfg(not(windows))]
-fn ocr_word_candidates_at(_x: i32, _y: i32) -> anyhow::Result<Vec<String>> {
+fn ocr_word_candidates_at(_x: i32, _y: i32) -> anyhow::Result<Vec<GeneratedCandidate>> {
     Ok(Vec::new())
 }
 
-fn push_ocr_variant(variants: &mut Vec<String>, characters: &[char]) {
-    if variants.len() >= 128 {
-        return;
-    }
-    let candidate = characters.iter().collect::<String>();
-    if let Ok(word) = clean_lookup_word(&candidate)
-        && !variants.contains(&word)
-    {
-        variants.push(word);
-    }
-}
-
-fn ocr_spelling_variants(text: &str) -> Vec<String> {
-    let characters = text.chars().collect::<Vec<_>>();
-    let options = characters
-        .iter()
-        .enumerate()
-        .filter_map(|(index, character)| {
-            let replacements: &[char] = match character {
-                '1' => &['l', 'i'],
-                'l' | 'L' => &['i'],
-                'i' | 'I' => &['l'],
-                '0' => &['o'],
-                '5' | 'S' => &['s'],
-                'x' | 'X' => &['i'],
-                _ => &[],
-            };
-            (!replacements.is_empty()).then(|| (index, replacements.to_vec()))
-        })
-        .collect::<Vec<_>>();
-    let mut variants = Vec::new();
-    for (index, replacements) in &options {
-        for replacement in replacements {
-            let mut candidate = characters.clone();
-            candidate[*index] = *replacement;
-            push_ocr_variant(&mut variants, &candidate);
-        }
-    }
-    for left in 0..options.len() {
-        for right in (left + 1)..options.len() {
-            for left_replacement in &options[left].1 {
-                for right_replacement in &options[right].1 {
-                    let mut candidate = characters.clone();
-                    candidate[options[left].0] = *left_replacement;
-                    candidate[options[right].0] = *right_replacement;
-                    push_ocr_variant(&mut variants, &candidate);
-                }
-            }
-        }
-    }
-    variants
-}
-
-fn push_ocr_candidate(candidates: &mut Vec<String>, text: &str) {
-    if let Ok(word) = clean_lookup_word(text)
-        && !candidates.contains(&word)
-    {
-        candidates.push(word);
-    }
-    for word in ocr_spelling_variants(text)
-        .into_iter()
-        .chain(ocr_boundary_trim_variants(text))
-    {
-        if !candidates.contains(&word) {
-            candidates.push(word);
-        }
-    }
-}
-
-fn ocr_fragment_text(text: &str) -> String {
-    text.chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric() || *character == '\'' || *character == '-'
-        })
-        .collect()
-}
-
-#[cfg(windows)]
-fn ocr_fragment_candidates(
-    words: &[String],
-    bounds: &[windows::Foundation::Rect],
-    selected: usize,
-) -> Vec<String> {
-    if selected >= words.len() || selected >= bounds.len() {
-        return Vec::new();
-    }
-    let height = bounds[selected].Height.max(1.0);
-    let limit = height * 0.35;
-    let mut candidates = Vec::new();
-    let mut merged = ocr_fragment_text(&words[selected]);
-    let mut index = selected;
-    while index + 1 < words.len() && index + 1 < bounds.len() && index < selected + 2 {
-        let gap = bounds[index + 1].X - (bounds[index].X + bounds[index].Width);
-        if gap > limit {
-            break;
-        }
-        merged.push_str(&ocr_fragment_text(&words[index + 1]));
-        push_ocr_candidate(&mut candidates, &merged);
-        index += 1;
-    }
-    let mut merged = ocr_fragment_text(&words[selected]);
-    let mut index = selected;
-    while index > 0 && index - 1 < bounds.len() && selected - index < 2 {
-        let gap = bounds[index].X - (bounds[index - 1].X + bounds[index - 1].Width);
-        if gap > limit {
-            break;
-        }
-        merged = format!("{}{}", ocr_fragment_text(&words[index - 1]), merged);
-        push_ocr_candidate(&mut candidates, &merged);
-        index -= 1;
-    }
-    candidates
-}
-
-fn ocr_edge_noise(character: char) -> bool {
-    matches!(
-        character,
-        '"' | '\'' | '“' | '”' | '‘' | '’' | 'C' | 'c' | 'x' | 'X' | '1' | '|'
-    )
-}
-
-fn ocr_boundary_trim_variants(text: &str) -> Vec<String> {
-    let characters = text.chars().collect::<Vec<_>>();
-    let mut variants = Vec::new();
-    for count in 1..=2 {
-        if characters.len() < count + 3 {
-            break;
-        }
-        if !characters[..count]
-            .iter()
-            .all(|character| ocr_edge_noise(*character))
-        {
-            break;
-        }
-        let candidate = characters[count..].iter().collect::<String>();
-        if let Ok(word) = clean_lookup_word(&candidate)
-            && !variants.contains(&word)
-        {
-            variants.push(word);
-        }
-    }
-    for count in 1..=2 {
-        if characters.len() < count + 3 {
-            break;
-        }
-        if !characters[characters.len() - count..]
-            .iter()
-            .all(|character| ocr_edge_noise(*character))
-        {
-            break;
-        }
-        let candidate = characters[..characters.len() - count]
-            .iter()
-            .collect::<String>();
-        if let Ok(word) = clean_lookup_word(&candidate)
-            && !variants.contains(&word)
-        {
-            variants.push(word);
-        }
-    }
-    variants
-}
-
-fn letters_fragment(text: &str) -> String {
-    text.chars().filter(char::is_ascii_alphabetic).collect()
-}
-
-fn adjacent_hyphen_index(words: &[String], selected: usize) -> Option<usize> {
-    if words.get(selected)?.trim_end().ends_with('-') {
-        return Some(selected);
-    }
-    if words.get(selected + 1)?.trim_end().ends_with('-') {
-        return Some(selected + 1);
-    }
-    None
-}
-
-fn hyphenated_candidates(
-    words: &[String],
-    selected: usize,
-    hyphen_index: usize,
-    next_words: &[String],
-) -> Vec<String> {
-    if selected >= words.len() || hyphen_index < selected || hyphen_index >= words.len() {
-        return Vec::new();
-    }
-    let mut bases = Vec::new();
-    for start in [
-        selected,
-        selected.saturating_sub(1),
-        selected.saturating_sub(2),
-    ] {
-        if start > hyphen_index {
-            continue;
-        }
-        let base = words[start..=hyphen_index]
-            .iter()
-            .map(|word| letters_fragment(word))
-            .collect::<String>();
-        if base.len() >= 2 && !bases.contains(&base) {
-            bases.push(base);
-        }
-    }
-    let mut candidates = Vec::new();
-    for base in bases {
-        let mut suffix = String::new();
-        for word in next_words.iter().take(8) {
-            suffix.push_str(&letters_fragment(word));
-            if suffix.len() >= 2 {
-                let candidate = format!("{base}{suffix}");
-                if !candidates.contains(&candidate) {
-                    candidates.push(candidate);
-                }
-            }
-        }
-    }
-    candidates
+#[cfg(not(windows))]
+fn ocr_word_candidates_at_clean(_x: i32, _y: i32) -> anyhow::Result<Vec<GeneratedCandidate>> {
+    Ok(Vec::new())
 }
 
 #[cfg(windows)]
@@ -1474,9 +1282,22 @@ fn recognize_image_bytes(bytes: &[u8]) -> anyhow::Result<windows::Media::Ocr::Oc
     stream.Seek(0)?;
     let decoder = BitmapDecoder::CreateAsync(&stream)?.join()?;
     let bitmap = decoder.GetSoftwareBitmapAsync()?.join()?;
-    let engine = create_ocr_engine()
-        .context("Windows OCR 不可用；请在系统语言设置中安装英文 OCR 可选功能")?;
-    Ok(engine.RecognizeAsync(&bitmap)?.join()?)
+    OCR_ENGINE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(
+                create_ocr_engine()
+                    .context("Windows OCR 不可用；请在系统语言设置中安装英文 OCR 可选功能")?,
+            );
+        }
+        let engine = slot.as_ref().expect("OCR 引擎刚刚初始化");
+        Ok(engine.RecognizeAsync(&bitmap)?.join()?)
+    })
+}
+
+#[cfg(windows)]
+thread_local! {
+    static OCR_ENGINE: RefCell<Option<windows::Media::Ocr::OcrEngine>> = const { RefCell::new(None) };
 }
 
 #[cfg(windows)]
@@ -1495,22 +1316,6 @@ fn create_ocr_engine() -> Option<windows::Media::Ocr::OcrEngine> {
         .ok()?
         .into_iter()
         .find_map(|language| OcrEngine::TryCreateFromLanguage(&language).ok())
-}
-
-#[cfg(windows)]
-fn point_in_ocr_word(
-    x: i32,
-    y: i32,
-    crop_left: i32,
-    crop_top: i32,
-    bounds: &windows::Foundation::Rect,
-    scale: f32,
-) -> bool {
-    let word_left = crop_left + (bounds.X / scale).round() as i32 - 3;
-    let word_top = crop_top + (bounds.Y / scale).round() as i32 - 3;
-    let word_right = word_left + (bounds.Width / scale).round() as i32 + 6;
-    let word_bottom = word_top + (bounds.Height / scale).round() as i32 + 6;
-    x >= word_left && x <= word_right && y >= word_top && y <= word_bottom
 }
 
 #[cfg(windows)]
@@ -1759,121 +1564,6 @@ fn run_mouse_hook() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn merges_adjacent_ocr_fragments() {
-        let words = ["\"wa", "r", "0", "n", "pollution\""]
-            .iter()
-            .map(|word| word.to_string())
-            .collect::<Vec<_>>();
-        let bounds = vec![
-            windows::Foundation::Rect {
-                X: 762.0,
-                Y: 355.0,
-                Width: 106.0,
-                Height: 50.0,
-            },
-            windows::Foundation::Rect {
-                X: 880.0,
-                Y: 369.0,
-                Width: 30.0,
-                Height: 36.0,
-            },
-            windows::Foundation::Rect {
-                X: 953.0,
-                Y: 369.0,
-                Width: 33.0,
-                Height: 36.0,
-            },
-            windows::Foundation::Rect {
-                X: 994.0,
-                Y: 369.0,
-                Width: 29.0,
-                Height: 36.0,
-            },
-            windows::Foundation::Rect {
-                X: 1070.0,
-                Y: 354.0,
-                Width: 379.0,
-                Height: 65.0,
-            },
-        ];
-        assert!(
-            ocr_fragment_candidates(&words, &bounds, 0)
-                .iter()
-                .any(|word| word == "war")
-        );
-        assert!(
-            ocr_fragment_candidates(&words, &bounds, 2)
-                .iter()
-                .any(|word| word == "on")
-        );
-    }
-
-    #[test]
-    fn corrects_ocr_x_for_i_and_edge_quote_noise() {
-        assert!(
-            ocr_spelling_variants("mxning")
-                .iter()
-                .any(|word| word == "mining")
-        );
-        assert!(
-            ocr_boundary_trim_variants("CCurban")
-                .iter()
-                .any(|word| word == "urban")
-        );
-    }
-
-    #[test]
-    fn corrects_common_ocr_l_i_1_confusions() {
-        assert!(
-            ocr_spelling_variants("llnear")
-                .iter()
-                .any(|word| word == "linear")
-        );
-        assert!(
-            ocr_spelling_variants("1ess")
-                .iter()
-                .any(|word| word == "less")
-        );
-        assert!(
-            ocr_spelling_variants("1lnear")
-                .iter()
-                .any(|word| word == "linear")
-        );
-    }
-
-    #[test]
-    fn only_joins_words_adjacent_to_a_trailing_hyphen() {
-        let words = ["Edge-cloud", "synergy:", "The", "data", "incor-"]
-            .iter()
-            .map(|word| word.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(adjacent_hyphen_index(&words, 0), None);
-        let words = ["directional", "i", "den-"]
-            .iter()
-            .map(|word| word.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(adjacent_hyphen_index(&words, 1), Some(2));
-        assert_eq!(adjacent_hyphen_index(&words, 2), Some(2));
-        assert_eq!(adjacent_hyphen_index(&words, 0), None);
-    }
-
-    #[test]
-    fn reconstructs_a_word_split_across_a_hyphenated_line_break() {
-        let words = ["directional", "i", "den-"]
-            .iter()
-            .map(|word| word.to_string())
-            .collect::<Vec<_>>();
-        let next = ["ti", "fi", "cation", "processi", "ng"]
-            .iter()
-            .map(|word| word.to_string())
-            .collect::<Vec<_>>();
-        let candidates = hyphenated_candidates(&words, 2, 2, &next);
-        assert!(candidates.iter().any(|word| word == "identification"));
-        let candidates = hyphenated_candidates(&words, 1, 2, &next);
-        assert!(candidates.iter().any(|word| word == "identification"));
-    }
 
     #[test]
     fn corrects_one_character_ocr_confusion_from_the_window_title() {

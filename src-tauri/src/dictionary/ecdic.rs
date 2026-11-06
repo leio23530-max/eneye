@@ -1,9 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::models::DictionaryEntry;
+use crate::recognition::WordEvidence;
 
 use super::{clean_optional_text, ecdict_connection, format_exchange, split_definitions};
 
@@ -71,6 +72,44 @@ impl EcdicDictionary {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// Frequency and exam evidence for one normalized headword. This is kept
+    /// separate from lookup so recognition can validate many candidates without
+    /// building full dictionary entries.
+    pub fn evidence(&self, word: &str, normalized_word: &str) -> Result<WordEvidence> {
+        let row = self
+            .connection
+            .query_row(
+                r#"
+                SELECT frq, bnc, collins, oxford
+                FROM entries
+                WHERE word_norm = ?1
+                ORDER BY CASE WHEN word = ?2 THEN 0 ELSE 1 END,
+                         length(word), id
+                LIMIT 1
+                "#,
+                params![normalized_word, word],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((frq, bnc, collins, oxford)) = row else {
+            return Ok(WordEvidence::default());
+        };
+        Ok(WordEvidence {
+            dictionary_hit: true,
+            frq: frq.filter(|value| *value > 0),
+            bnc: bnc.filter(|value| *value > 0),
+            collins: collins.unwrap_or(0).clamp(0, 5),
+            oxford: oxford.unwrap_or(0) != 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -96,10 +135,16 @@ mod tests {
                     definition TEXT NOT NULL,
                     translation TEXT NOT NULL,
                     pos TEXT NOT NULL,
-                    exchange TEXT NOT NULL
+                    exchange TEXT NOT NULL,
+                    collins INTEGER NOT NULL DEFAULT 0,
+                    oxford INTEGER NOT NULL DEFAULT 0,
+                    bnc INTEGER NOT NULL DEFAULT 0,
+                    frq INTEGER NOT NULL DEFAULT 0
                 );
-                INSERT INTO entries VALUES
-                    (1, 'hello', 'hello', 'həˈləʊ', 'greeting', '你好', 'int.', 'p:helloed');
+                INSERT INTO entries
+                    (id, word, word_norm, phonetic, definition, translation, pos, exchange, collins, oxford, bnc, frq)
+                VALUES
+                    (1, 'hello', 'hello', 'həˈləʊ', 'greeting', '你好', 'int.', 'p:helloed', 5, 1, 17, 11);
                 "#,
             )
             .unwrap();

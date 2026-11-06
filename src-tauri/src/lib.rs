@@ -3,6 +3,7 @@ mod capture;
 mod dictionary;
 mod fonts;
 mod models;
+mod recognition;
 mod settings;
 mod storage;
 mod translation;
@@ -16,6 +17,7 @@ use std::{
 use base64::Engine as _;
 use dictionary::{DictionaryManager, DictionaryStatus, ExternalDictionary};
 use models::{BootstrapData, HistoryRecord, LookupResult, Notebook, NotebookWord};
+use serde::{Deserialize, Serialize};
 use settings::{AppSettings, SettingsStore};
 use storage::Storage;
 use tauri::{
@@ -29,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use translation::{AiKeyStore, TranslationEvent, TranslationRequest, TranslationTasks};
 
 struct AppState {
+    data_dir: PathBuf,
     settings_store: SettingsStore,
     settings: Mutex<AppSettings>,
     storage: Mutex<Storage>,
@@ -57,6 +60,7 @@ impl AppState {
             DictionaryManager::open(dictionary_path, data_dir.join("dictionaries.json"));
 
         Ok(Self {
+            data_dir,
             settings_store,
             settings: Mutex::new(settings),
             storage: Mutex::new(storage),
@@ -299,6 +303,64 @@ fn get_dictionary_status(state: State<'_, AppState>) -> Result<DictionaryStatus,
         .lock()
         .map_err(|_| "dictionary lock is poisoned".to_owned())?
         .status())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecognitionCorrection {
+    observed: String,
+    corrected: String,
+    source: Option<String>,
+    confidence: Option<f64>,
+    reason: Option<String>,
+    #[serde(default)]
+    candidates: Vec<recognition::RecognitionCandidate>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecognitionCorrectionRecord {
+    at: u64,
+    observed: String,
+    corrected: String,
+    source: Option<String>,
+    confidence: Option<f64>,
+    reason: Option<String>,
+    candidates: Vec<recognition::RecognitionCandidate>,
+}
+
+#[tauri::command]
+fn record_recognition_correction(
+    correction: RecognitionCorrection,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let observed = correction.observed.trim();
+    let corrected = correction.corrected.trim();
+    if corrected.is_empty() || corrected.chars().count() > 80 {
+        return Err("请填写要改成什么词（不超过 80 个字符）".into());
+    }
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let record = RecognitionCorrectionRecord {
+        at,
+        observed: observed.chars().take(80).collect(),
+        corrected: corrected.to_owned(),
+        source: correction.source,
+        confidence: correction.confidence,
+        reason: correction.reason,
+        candidates: correction.candidates.into_iter().take(20).collect(),
+    };
+    let line = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+    let path = state.data_dir.join("recognition-corrections.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    use std::io::Write as _;
+    writeln!(file, "{line}").map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -727,6 +789,7 @@ pub fn run() {
             remove_notebook_word,
             get_dictionary_status,
             get_capture_diagnostics,
+            record_recognition_correction,
             list_external_dictionaries,
             add_external_dictionary,
             remove_external_dictionary,

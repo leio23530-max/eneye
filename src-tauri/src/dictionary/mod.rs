@@ -11,6 +11,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::models::LookupResult;
+use crate::recognition::WordEvidence;
 
 pub use ecdic::EcdicDictionary;
 pub use external::{ExternalDictionary, LoadedExternalDictionary};
@@ -77,6 +78,13 @@ impl DictionaryManager {
 
     pub fn lookup(&self, raw_word: &str, source: &str) -> Result<LookupResult> {
         let word = clean_lookup_word(raw_word)?;
+        let letters = word.chars().count();
+        if letters == 1 && !word.eq_ignore_ascii_case("a") && !word.eq_ignore_ascii_case("i") {
+            anyhow::bail!("ignore a single-letter hover token");
+        }
+        if letters == 2 && !self.evidence(&word).is_common_short_word() {
+            anyhow::bail!("ignore a two-letter token without common-word evidence");
+        }
         let normalized_word = normalize_word(&word);
         let mut entries = Vec::new();
         for dictionary in &self.external {
@@ -93,6 +101,20 @@ impl DictionaryManager {
             source: source.to_owned(),
             entries,
         })
+    }
+
+    /// Cheap lexical evidence for OCR candidate ranking. Only ECDICT is
+    /// consulted here: ranking runs for many variants and must not parse MDX
+    /// dictionaries dozens of times per hover.
+    pub fn evidence(&self, raw_word: &str) -> WordEvidence {
+        let Ok(word) = clean_lookup_word(raw_word) else {
+            return WordEvidence::default();
+        };
+        let normalized_word = normalize_word(&word);
+        self.ecdic
+            .as_ref()
+            .and_then(|dictionary| dictionary.evidence(&word, &normalized_word).ok())
+            .unwrap_or_default()
     }
 
     /// Looks up a word or phrase in every external dictionary, plus ECDICT

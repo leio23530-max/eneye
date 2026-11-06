@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::dictionary::clean_lookup_word;
+use crate::recognition::RecognitionCandidate;
 
 #[cfg(windows)]
 use windows::Win32::{
@@ -29,6 +30,12 @@ pub struct WordProbeReport {
     pub source: Option<String>,
     pub total_ms: u64,
     pub stages: Vec<ProbeStage>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub candidates: Vec<RecognitionCandidate>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl Default for WordProbeReport {
@@ -37,6 +44,9 @@ impl Default for WordProbeReport {
             word: None,
             source: None,
             total_ms: 0,
+            confidence: None,
+            candidates: Vec::new(),
+            reason: None,
             stages: vec![
                 ProbeStage {
                     provider: "uia".into(),
