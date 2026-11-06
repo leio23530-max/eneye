@@ -328,6 +328,18 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     let best = recognition::choose_best(ranked.clone());
                     accessible.report.candidates = ranked;
                     if let Some(best) = best {
+                        let visual_prefix = candidates.iter().any(|candidate| {
+                            candidate.visual_continuation
+                                && candidate.text.eq_ignore_ascii_case(&best.text)
+                        });
+                        if visual_prefix
+                            && accessible
+                                .word
+                                .as_ref()
+                                .is_some_and(|(text, _)| text.eq_ignore_ascii_case(&best.text))
+                        {
+                            accessible.word = None;
+                        }
                         let uia_lower = uia_text.to_lowercase();
                         let ocr_lower = best.text.to_lowercase();
                         let uia_has_punctuation = uia_lower.chars().any(|character| {
@@ -512,6 +524,14 @@ fn resolve_ocr(
         );
         return None;
     }
+    let mut candidates = candidates;
+    if candidates
+        .iter()
+        .any(|candidate| candidate.visual_continuation)
+        && let Ok(extra) = ocr_word_candidates_at_clean(point.0, point.1)
+    {
+        candidates.extend(extra);
+    }
     let ranked = rank_ocr_candidates(app, &candidates);
     report.candidates = ranked.clone();
     let Some(best) = recognition::choose_best(ranked) else {
@@ -525,6 +545,24 @@ fn resolve_ocr(
         );
         return None;
     };
+    if candidates.iter().any(|candidate| {
+        candidate.visual_continuation && candidate.text.eq_ignore_ascii_case(&best.text)
+    }) {
+        report.word = None;
+        report.source = None;
+        report.confidence = Some(best.confidence);
+        report.reason = Some(format!(
+            "{}；右侧仍有字形，当前只是词的前半段，已隐藏",
+            best.reason
+        ));
+        word_probe::update_ocr_stage(
+            report,
+            false,
+            started.elapsed(),
+            "词形向右延伸，前缀不完整，已隐藏".into(),
+        );
+        return None;
+    }
     let confidence = best.confidence;
     let reason = best.reason.clone();
     let mut word = best.text;
@@ -1177,9 +1215,12 @@ fn ocr_word_candidates_at_with(
     use uiautomation::{screenshots::Screenshot, types::Rect};
 
     const OCR_SCALE: f32 = 2.0;
-    let left = x - 600;
-    let top = y - 80;
-    let rect = Rect::new(left, top, x + 220, y + 80);
+    let (virtual_left, virtual_top, virtual_width, virtual_height) = virtual_screen_bounds();
+    let left = (x - 600).max(virtual_left);
+    let top = (y - 80).max(virtual_top);
+    let right = (x + 220).min(virtual_left + virtual_width);
+    let bottom = (y + 80).min(virtual_top + virtual_height);
+    let rect = Rect::new(left, top, right, bottom);
     let screenshot = Screenshot::capture_rect(rect)?;
     let raw = screenshot.to_bmp_bytes();
     let raw = if strip_small_glyphs {
@@ -1216,13 +1257,107 @@ fn ocr_word_candidates_at_with(
         return Ok(Vec::new());
     };
     let next_line = lines.get(line_index + 1).map(Vec::as_slice);
-    Ok(recognition::generate_ocr_candidates_at(
-        &lines[line_index],
-        word_index,
-        x,
-        y,
-        next_line,
-    ))
+    let mut candidates =
+        recognition::generate_ocr_candidates_at(&lines[line_index], word_index, x, y, next_line);
+    if has_letter_ink_right(&bmp, left, top, OCR_SCALE, &lines[line_index][word_index]) {
+        for candidate in &mut candidates {
+            if candidate.origin == "raw" {
+                candidate.visual_continuation = true;
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+#[cfg(windows)]
+fn virtual_screen_bounds() -> (i32, i32, i32, i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    if width <= 0 || height <= 0 {
+        (0, 0, 1920, 1080)
+    } else {
+        (left, top, width, height)
+    }
+}
+
+/// True when glyph ink starts immediately to the right of the OCR token and is
+/// tall/wide enough to be a letter, not a quote, period, or underline.
+#[cfg(windows)]
+fn has_letter_ink_right(bmp: &[u8], left: i32, top: i32, scale: f32, token: &OcrToken) -> bool {
+    let Ok(image) = image::load_from_memory(bmp) else {
+        return false;
+    };
+    let mut gray = image.to_luma8();
+    let (width, height) = gray.dimensions();
+    if width < 8 || height < 8 {
+        return false;
+    }
+    let mean = gray.as_raw().iter().map(|value| *value as u64).sum::<u64>()
+        / (width as u64 * height as u64);
+    if mean < 100 {
+        for value in gray.as_mut() {
+            *value = 255 - *value;
+        }
+    }
+
+    let token_height = (token.bounds.height * scale).round().max(8.0) as i32;
+    if token_height < 8 {
+        return false;
+    }
+    let x0 = ((token.bounds.right() - left as f32) * scale).round() as i32;
+    let y0 = ((token.bounds.y - top as f32) * scale).round() as i32;
+    let band_top = y0 + (token_height as f32 * 0.10) as i32;
+    let band_bottom = y0 + (token_height as f32 * 0.78) as i32;
+    if x0 < 0 || x0 >= width as i32 || band_top < 0 || band_bottom >= height as i32 {
+        return false;
+    }
+
+    let max_search = (token_height as f32 * 0.55).max(6.0) as i32;
+    let mut first_ink = None;
+    for dx in 0..max_search {
+        let x = x0 + dx;
+        if x >= width as i32 {
+            break;
+        }
+        let mut count = 0;
+        for y in band_top..=band_bottom {
+            if gray.get_pixel(x as u32, y as u32)[0] < 160 {
+                count += 1;
+            }
+        }
+        if count >= 2 {
+            first_ink = Some(dx);
+            break;
+        }
+    }
+    let Some(first_ink) = first_ink else {
+        return false;
+    };
+    if first_ink as f32 > token_height as f32 * 0.22 {
+        return false;
+    }
+
+    let extension_width = (token_height as f32 * 0.9) as i32;
+    let mut dark_pixels = 0;
+    for dx in first_ink..first_ink + extension_width {
+        let x = x0 + dx;
+        if x >= width as i32 {
+            break;
+        }
+        for y in band_top..=band_bottom {
+            if gray.get_pixel(x as u32, y as u32)[0] < 160 {
+                dark_pixels += 1;
+            }
+        }
+    }
+    dark_pixels as f32 >= token_height as f32 * 0.45
 }
 
 #[cfg(not(windows))]
@@ -1724,6 +1859,120 @@ mod tests {
     #[test]
     fn uses_any_installed_windows_ocr_language() {
         assert!(create_ocr_engine().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sees_letter_ink_right_of_a_prefix_but_not_a_quote() {
+        let image = include_bytes!("../tests/fixtures/ocr-pollution.png");
+        let prefix = OcrToken {
+            text: "poll".into(),
+            bounds: OcrBox {
+                x: 22.0,
+                y: 18.0,
+                width: 60.0,
+                height: 33.0,
+            },
+        };
+        assert!(has_letter_ink_right(image, 0, 0, 1.0, &prefix));
+        let complete = OcrToken {
+            text: "pollution".into(),
+            bounds: OcrBox {
+                x: 22.0,
+                y: 18.0,
+                width: 194.0,
+                height: 33.0,
+            },
+        };
+        assert!(!has_letter_ink_right(image, 0, 0, 1.0, &complete));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_pollution_fixture_never_selects_a_prefix() {
+        let result =
+            recognize_image_bytes(include_bytes!("../tests/fixtures/ocr-pollution.png")).unwrap();
+        let mut tokens = Vec::new();
+        for line in result.Lines().unwrap() {
+            for word in line.Words().unwrap() {
+                let bounds = word.BoundingRect().unwrap();
+                tokens.push(OcrToken {
+                    text: word.Text().unwrap().to_string(),
+                    bounds: OcrBox {
+                        x: bounds.X,
+                        y: bounds.Y,
+                        width: bounds.Width,
+                        height: bounds.Height,
+                    },
+                });
+            }
+        }
+        let selected = tokens
+            .iter()
+            .position(|token| token.text.to_ascii_lowercase().contains("pollution"))
+            .unwrap();
+        let y = tokens[selected].bounds.y + tokens[selected].bounds.height / 2.0;
+        for pointer in [30.0_f32, 50.0, 80.0, 110.0, 140.0, 165.0] {
+            let generated = recognition::generate_ocr_candidates_at(
+                &tokens,
+                selected,
+                pointer.round() as i32,
+                y.round() as i32,
+                None,
+            );
+            let ranked = recognition::rank_generated(&generated, |word| {
+                let hit = word == "pollution" || word == "poll";
+                WordEvidence {
+                    dictionary_hit: hit,
+                    frq: hit.then_some(1200),
+                    bnc: None,
+                    collins: if hit { 4 } else { 0 },
+                    oxford: hit,
+                }
+            });
+            assert_eq!(
+                recognition::choose_best(ranked).map(|candidate| candidate.text),
+                Some("pollution".into()),
+                "pointer {pointer}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn underlined_pollution_fixture_keeps_the_whole_word() {
+        let result = recognize_image_bytes(include_bytes!(
+            "../tests/fixtures/ocr-pollution-underlined.png"
+        ))
+        .unwrap();
+        let text = result
+            .Lines()
+            .unwrap()
+            .into_iter()
+            .filter_map(|line| line.Text().ok())
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.to_ascii_lowercase().contains("pollution"),
+            "Windows OCR did not keep the underlined word: {text:?}"
+        );
+        let prefix = OcrToken {
+            text: "poll".into(),
+            bounds: OcrBox {
+                x: 22.0,
+                y: 18.0,
+                width: 60.0,
+                height: 33.0,
+            },
+        };
+        assert!(has_letter_ink_right(
+            include_bytes!("../tests/fixtures/ocr-pollution-underlined.png"),
+            0,
+            0,
+            1.0,
+            &prefix
+        ));
     }
 
     #[cfg(windows)]

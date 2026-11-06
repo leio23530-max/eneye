@@ -104,6 +104,9 @@ pub struct GeneratedCandidate {
     pub raw_exact: bool,
     pub origin: &'static str,
     pub pointer_char: usize,
+    /// The visible glyphs continue to the right of this OCR token, so this
+    /// spelling is only a prefix and must not be treated as a complete word.
+    pub visual_continuation: bool,
 }
 
 impl GeneratedCandidate {
@@ -118,6 +121,7 @@ impl GeneratedCandidate {
             raw_exact: false,
             origin: "hyphen",
             pointer_char,
+            visual_continuation: false,
         }
     }
 
@@ -139,6 +143,7 @@ impl GeneratedCandidate {
             raw_exact,
             origin,
             pointer_char,
+            visual_continuation: false,
         }
     }
 }
@@ -558,6 +563,7 @@ fn push_fragment_candidates(
             prefix_chars,
             "merge-right",
         ) {
+            push_merged_edges(&candidate, output);
             output.push(candidate);
         }
     }
@@ -586,10 +592,36 @@ fn push_fragment_candidates(
             left_prefix_chars,
             "merge-left",
         ) {
+            push_merged_edges(&candidate, output);
             output.push(candidate);
         }
     }
     let _ = selected_token;
+}
+
+fn push_merged_edges(candidate: &GeneratedCandidate, output: &mut Vec<GeneratedCandidate>) {
+    let characters = candidate.text.chars().collect::<Vec<_>>();
+    for count in 1..=2 {
+        if characters.len() <= count + 3 || candidate.pointer_char >= characters.len() - count {
+            continue;
+        }
+        let text = characters[..characters.len() - count]
+            .iter()
+            .collect::<String>();
+        if output.iter().any(|existing| existing.text == text) {
+            continue;
+        }
+        let mut trimmed = GeneratedCandidate::new(
+            text,
+            &candidate.raw_token,
+            candidate.pointer_char,
+            "merge-trim",
+            false,
+            0,
+        );
+        trimmed.merge_count = candidate.merge_count.max(1);
+        output.push(trimmed);
+    }
 }
 
 fn merged_candidate(
@@ -1114,6 +1146,15 @@ mod tests {
         assert!(best_at(&[token("A)", 100.0, 14.0)], 103).is_none());
         assert!(best_at(&[token("...", 100.0, 14.0)], 104).is_none());
         assert!(best_at(&[token("wa", 100.0, 12.0)], 104).is_none());
+    }
+
+    #[test]
+    fn merged_fragments_trim_an_ocr_noise_suffix() {
+        let tokens = [token("poll", 22.0, 60.0), token("utionl'", 82.0, 134.0)];
+        for pointer in [30, 45, 60, 80, 100, 140, 165] {
+            let got = best_at(&tokens, pointer).map(|candidate| candidate.text);
+            assert_eq!(got.as_deref(), Some("pollution"), "pointer {pointer}");
+        }
     }
 
     #[test]
