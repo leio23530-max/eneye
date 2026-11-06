@@ -159,9 +159,31 @@ export interface ProbeStage {
   detail: string;
 }
 
+export interface RecognitionCandidate {
+  text: string;
+  provider: string;
+  rawToken: string;
+  pointerInside: boolean;
+  pointerOnLetter: boolean;
+  mergeCount: number;
+  crossedSpace: boolean;
+  crossedPunctuation: boolean;
+  editDistance: number;
+  dictionaryHit: boolean;
+  frq?: number | null;
+  bnc?: number | null;
+  collins: number;
+  oxford: boolean;
+  confidence: number;
+  reason: string;
+}
+
 export interface WordProbeReport {
   word?: string;
   source?: string;
   totalMs: number;
   stages: ProbeStage[];
+  confidence?: number | null;
+  candidates?: RecognitionCandidate[];
+  reason?: string | null;
 }

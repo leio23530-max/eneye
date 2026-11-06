@@ -13,6 +13,7 @@ import {
   listNotebooks,
   listNotebookWords,
   removeExternalDictionary,
+  recordRecognitionCorrection,
   removeNotebookWord,
   reorderExternalDictionaries,
   setAiKey,
@@ -178,6 +179,9 @@ export function SettingsWindow({
   const [newNotebookName, setNewNotebookName] = useState("");
   const [notebookSaving, setNotebookSaving] = useState(false);
   const [probeReport, setProbeReport] = useState<WordProbeReport | null>(null);
+  const [correctionOpen, setCorrectionOpen] = useState(false);
+  const [correctionWord, setCorrectionWord] = useState("");
+  const [correctionStatus, setCorrectionStatus] = useState("");
   const [liveAgentConnections, setLiveAgentConnections] =
     useState<AgentConnectionStatus[]>(agentConnections);
   const [agentDetectionLoading, setAgentDetectionLoading] = useState(false);
@@ -1410,8 +1414,11 @@ export function SettingsWindow({
                     <strong>最近一次取词探针</strong>
                     <span>
                       {probeReport?.word
-                        ? `命中 ${probeReport.word} · ${probeReport.source}`
+                        ? `取词 ${probeReport.word} · ${probeReport.source}`
                         : "尚未命中单词"}
+                      {probeReport?.confidence != null
+                        ? ` · 置信度 ${Math.round(probeReport.confidence * 100)}%`
+                        : ""}
                       {probeReport ? ` · ${probeReport.totalMs}ms` : ""}
                     </span>
                   </div>
@@ -1437,6 +1444,100 @@ export function SettingsWindow({
                     <time>{stage.durationMs}ms</time>
                   </div>
                 ))}
+                {probeReport?.reason && (
+                  <p className="probe-reason">判断依据：{probeReport.reason}</p>
+                )}
+                {(probeReport?.candidates ?? []).length > 0 && (
+                  <div className="probe-candidates">
+                    <strong>候选排序</strong>
+                    {probeReport?.candidates
+                      ?.slice(0, 6)
+                      .map((candidate, index) => (
+                        <div
+                          className={`probe-candidate ${
+                            candidate.text === probeReport.word
+                              ? "is-chosen"
+                              : ""
+                          }`}
+                          key={`${candidate.text}-${candidate.provider}-${index}`}
+                        >
+                          <span className="probe-candidate-word">
+                            {candidate.text}
+                          </span>
+                          <span className="probe-candidate-score">
+                            {Math.round(candidate.confidence * 100)}%
+                          </span>
+                          <span className="probe-candidate-reason">
+                            {candidate.reason}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                )}
+                <div className="probe-correction">
+                  <button
+                    className="text-button"
+                    onClick={() => {
+                      setCorrectionOpen((open) => !open);
+                      setCorrectionWord(probeReport?.word ?? "");
+                      setCorrectionStatus("");
+                    }}
+                    type="button"
+                  >
+                    这次识别错了
+                  </button>
+                  {correctionOpen && (
+                    <form
+                      className="probe-correction-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const corrected = correctionWord.trim();
+                        if (!corrected) {
+                          setCorrectionStatus("请先填写正确的词");
+                          return;
+                        }
+                        setCorrectionStatus("正在保存…");
+                        void recordRecognitionCorrection({
+                          observed: probeReport?.word ?? "",
+                          corrected,
+                          source: probeReport?.source ?? null,
+                          confidence: probeReport?.confidence ?? null,
+                          reason: probeReport?.reason ?? null,
+                          candidates: probeReport?.candidates ?? [],
+                        })
+                          .then(() => {
+                            setCorrectionStatus("已记录到本机诊断文件");
+                            setCorrectionOpen(false);
+                          })
+                          .catch((error: unknown) =>
+                            setCorrectionStatus(
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            ),
+                          );
+                      }}
+                    >
+                      <input
+                        aria-label="正确的词"
+                        autoFocus
+                        onChange={(event) =>
+                          setCorrectionWord(event.target.value)
+                        }
+                        placeholder="填写正确的词"
+                        value={correctionWord}
+                      />
+                      <button className="secondary-button" type="submit">
+                        保存
+                      </button>
+                    </form>
+                  )}
+                  {correctionStatus && (
+                    <span className="probe-correction-status">
+                      {correctionStatus}
+                    </span>
+                  )}
+                </div>
               </div>
             </section>
           </div>

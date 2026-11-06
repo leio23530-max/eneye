@@ -10,6 +10,7 @@ import type {
   LookupResult,
   Notebook,
   NotebookWord,
+  RecognitionCandidate,
   TranslationEvent,
   TranslationRequest,
   WordProbeReport,
@@ -259,6 +260,18 @@ export async function getHistory(
 export async function getCaptureDiagnostics(): Promise<WordProbeReport | null> {
   if (!isTauriRuntime()) return null;
   return invoke<WordProbeReport>("get_capture_diagnostics");
+}
+
+export async function recordRecognitionCorrection(correction: {
+  observed: string;
+  corrected: string;
+  source?: string | null;
+  confidence?: number | null;
+  reason?: string | null;
+  candidates: RecognitionCandidate[];
+}): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("record_recognition_correction", { correction });
 }
 
 export async function addExternalDictionary(

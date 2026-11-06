@@ -1185,6 +1185,89 @@ select {
   font-size: 9px;
 }
 
+.probe-reason {
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 10px 0 0;
+}
+
+.probe-candidates {
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.probe-candidates > strong {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.probe-candidate {
+  align-items: baseline;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, auto) 40px minmax(0, 1fr);
+}
+
+.probe-candidate-word {
+  font-family: "Iowan Old Style", Georgia, serif;
+  font-size: 13px;
+}
+
+.probe-candidate.is-chosen .probe-candidate-word {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.probe-candidate-score {
+  color: var(--ink-faint);
+  font-family: Consolas, monospace;
+  font-size: 9px;
+}
+
+.probe-candidate-reason {
+  color: var(--ink-faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.probe-correction {
+  align-items: center;
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.probe-correction-form {
+  display: flex;
+  gap: 6px;
+}
+
+.probe-correction-form input {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 11px;
+  height: 30px;
+  padding: 0 9px;
+  width: 150px;
+}
+
+.probe-correction-status {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
 .empty-panel {
   align-content: center;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
