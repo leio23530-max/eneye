@@ -238,7 +238,34 @@ pub fn generate_ocr_candidates_at(
         return Vec::new();
     };
     let raw = token.text.as_str();
-    let mut output = Vec::new();
+    let mut output: Vec<GeneratedCandidate> = Vec::new();
+
+    if raw.chars().any(|character| character.is_whitespace()) {
+        let joined = raw
+            .chars()
+            .filter(|character| character.is_ascii_alphabetic())
+            .collect::<String>();
+        let joined_pointer = raw
+            .chars()
+            .take(pointer_char)
+            .filter(|character| character.is_ascii_alphabetic())
+            .count();
+        if joined.chars().count() >= 4
+            && joined_pointer < joined.chars().count()
+            && !output
+                .iter()
+                .any(|existing| existing.text == joined && existing.origin == "joined")
+        {
+            output.push(GeneratedCandidate::new(
+                joined,
+                raw,
+                joined_pointer,
+                "joined",
+                false,
+                0,
+            ));
+        }
+    }
 
     if let Some((word, start, end)) = clean_span(raw) {
         let base_chars = word.chars().collect::<Vec<_>>();
@@ -958,6 +985,7 @@ mod tests {
             "insufficient" => evidence(true, Some(4_265), Some(4_825), 1, false),
             "wa" => evidence(true, None, Some(11_044), 0, false),
             "nanogenerator" | "anogenerator" => WordEvidence::default(),
+            "pollution" => evidence(true, Some(1_200), Some(1_500), 4, true),
             _ if KNOWN_WORDS.contains(&text.to_ascii_lowercase().as_str()) => {
                 evidence(true, Some(4_000), Some(3_500), 3, false)
             }
@@ -1086,6 +1114,13 @@ mod tests {
         assert!(best_at(&[token("A)", 100.0, 14.0)], 103).is_none());
         assert!(best_at(&[token("...", 100.0, 14.0)], 104).is_none());
         assert!(best_at(&[token("wa", 100.0, 12.0)], 104).is_none());
+    }
+
+    #[test]
+    fn joins_a_word_split_by_an_internal_space_in_one_ocr_token() {
+        let tokens = [token("pollut ion", 100.0, 190.0)];
+        let got = best_at(&tokens, 150).map(|candidate| candidate.text);
+        assert_eq!(got.as_deref(), Some("pollution"));
     }
 
     #[test]
