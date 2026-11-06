@@ -28,6 +28,45 @@ static EVENT_SENDER: OnceLock<Sender<MouseInput>> = OnceLock::new();
 static TRANSLATION_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiaOcrDecision {
+    KeepUia,
+    UseOcr,
+    ClearUia,
+}
+
+fn decide_uia_ocr(
+    uia_text: &str,
+    best: &RecognitionCandidate,
+    visual_prefix: bool,
+    uia_evidence: &WordEvidence,
+) -> UiaOcrDecision {
+    if visual_prefix {
+        return if uia_text.eq_ignore_ascii_case(&best.text) {
+            UiaOcrDecision::ClearUia
+        } else {
+            UiaOcrDecision::KeepUia
+        };
+    }
+    let uia_lower = uia_text.to_lowercase();
+    let ocr_lower = best.text.to_lowercase();
+    let uia_has_punctuation = uia_lower
+        .chars()
+        .any(|character| !character.is_ascii_alphabetic() && character != '\'' && character != '-');
+    let ocr_extends =
+        ocr_lower.chars().count() > uia_lower.chars().count() && ocr_lower.starts_with(&uia_lower);
+    let uia_needs_help = !uia_evidence.dictionary_hit && uia_lower.chars().count() > 1;
+    let confident = best.confidence >= 0.80 && best.dictionary_hit;
+    if ocr_lower != uia_lower
+        && (!uia_has_punctuation || ocr_extends)
+        && (ocr_extends || (uia_needs_help && confident))
+    {
+        UiaOcrDecision::UseOcr
+    } else {
+        UiaOcrDecision::KeepUia
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayMode {
     Hidden,
     Word,
@@ -332,6 +371,20 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                             candidate.visual_continuation
                                 && candidate.text.eq_ignore_ascii_case(&best.text)
                         });
+                        let uia_evidence = dictionary_evidence(&app, &uia_text);
+                        match decide_uia_ocr(&uia_text, &best, visual_prefix, &uia_evidence) {
+                            UiaOcrDecision::ClearUia => accessible.word = None,
+                            UiaOcrDecision::UseOcr => {
+                                accessible.word = Some((best.text.clone(), "ocr"));
+                                accessible.report.word = Some(best.text.clone());
+                                accessible.report.source = Some("ocr".into());
+                                accessible.report.confidence = Some(best.confidence);
+                                accessible.report.reason = Some(best.reason.clone());
+                            }
+                            UiaOcrDecision::KeepUia => {}
+                        }
+                        // Hard veto after reconciliation: a visually truncated
+                        // prefix must never be committed as the UIA result.
                         if visual_prefix
                             && accessible
                                 .word
@@ -339,29 +392,6 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                                 .is_some_and(|(text, _)| text.eq_ignore_ascii_case(&best.text))
                         {
                             accessible.word = None;
-                        }
-                        let uia_lower = uia_text.to_lowercase();
-                        let ocr_lower = best.text.to_lowercase();
-                        let uia_has_punctuation = uia_lower.chars().any(|character| {
-                            !character.is_ascii_alphabetic()
-                                && character != '\''
-                                && character != '-'
-                        });
-                        let ocr_extends = ocr_lower.chars().count() > uia_lower.chars().count()
-                            && ocr_lower.starts_with(&uia_lower);
-                        let uia_evidence = dictionary_evidence(&app, &uia_text);
-                        let uia_needs_help =
-                            !uia_evidence.dictionary_hit && uia_lower.chars().count() > 1;
-                        let confident = best.confidence >= 0.80 && best.dictionary_hit;
-                        if ocr_lower != uia_lower
-                            && (!uia_has_punctuation || ocr_extends)
-                            && (ocr_extends || (uia_needs_help && confident))
-                        {
-                            accessible.word = Some((best.text.clone(), "ocr"));
-                            accessible.report.word = Some(best.text.clone());
-                            accessible.report.source = Some("ocr".into());
-                            accessible.report.confidence = Some(best.confidence);
-                            accessible.report.reason = Some(best.reason.clone());
                         }
                     }
                 }
@@ -1699,6 +1729,61 @@ fn run_mouse_hook() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ocr_candidate(text: &str, confidence: f64, dictionary_hit: bool) -> RecognitionCandidate {
+        RecognitionCandidate {
+            text: text.into(),
+            provider: "ocr".into(),
+            raw_token: Some(text.into()),
+            pointer_inside: true,
+            pointer_on_letter: true,
+            merge_count: 0,
+            crossed_space: false,
+            crossed_punctuation: false,
+            edit_distance: 0,
+            dictionary_hit,
+            frq: None,
+            bnc: None,
+            collins: 0,
+            oxford: false,
+            confidence,
+            reason: "test".into(),
+        }
+    }
+
+    #[test]
+    fn uia_complete_word_wins_over_a_visual_ocr_prefix() {
+        let evidence = WordEvidence {
+            dictionary_hit: true,
+            frq: Some(1200),
+            bnc: None,
+            collins: 4,
+            oxford: true,
+        };
+        let prefix = ocr_candidate("poll", 0.92, true);
+        assert_eq!(
+            decide_uia_ocr("pollution", &prefix, true, &evidence),
+            UiaOcrDecision::KeepUia
+        );
+        assert_eq!(
+            decide_uia_ocr("poll", &prefix, true, &evidence),
+            UiaOcrDecision::ClearUia
+        );
+        assert_eq!(
+            decide_uia_ocr("pollution", &prefix, false, &evidence),
+            UiaOcrDecision::KeepUia
+        );
+
+        let full = ocr_candidate("pollution", 0.94, true);
+        let missing = WordEvidence {
+            dictionary_hit: false,
+            ..evidence
+        };
+        assert_eq!(
+            decide_uia_ocr("poll", &full, false, &missing),
+            UiaOcrDecision::UseOcr
+        );
+    }
 
     #[test]
     fn corrects_one_character_ocr_confusion_from_the_window_title() {
