@@ -218,9 +218,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
         <OverlayCard
           key={lookup.normalizedWord}
           onClose={() => void hide()}
-          onExplain={
-            settings.aiTranslationEnabled ? explainWord : undefined
-          }
+          onExplain={settings.aiTranslationEnabled ? explainWord : undefined}
           onPinChange={(value) => void changePinned(value)}
           settings={settings}
           lookup={lookup}

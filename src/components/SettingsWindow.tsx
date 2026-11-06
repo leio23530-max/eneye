@@ -833,15 +833,14 @@ export function SettingsWindow({
                 <span>
                   <span className="field-label">启用 AI 翻译</span>
                   <span className="field-help">
-                    关闭后不响应拖选翻译、Ctrl+Alt+T 和卡片里的 AI 解释；词典查词不受影响
+                    关闭后不响应拖选翻译、Ctrl+Alt+T 和卡片里的 AI
+                    解释；词典查词不受影响
                   </span>
                 </span>
                 <Toggle
                   checked={settings.aiTranslationEnabled}
                   label="启用 AI 翻译"
-                  onChange={(value) =>
-                    update("aiTranslationEnabled", value)
-                  }
+                  onChange={(value) => update("aiTranslationEnabled", value)}
                 />
               </div>
             </section>
