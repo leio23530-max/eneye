@@ -328,6 +328,13 @@ fn probe_win32_text(point: (i32, i32)) -> Option<String> {
     }
     let text_len = unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize;
     if text_len == 0 {
+        // Windows 11 Notepad's "Edit" control reports zero through
+        // GetWindowTextLengthW while still serving WM_GETTEXT and exact
+        // EM_CHARFROMPOS/EM_GETLINE positions. Read only the hovered line so
+        // large documents never require copying the whole buffer.
+        if is_edit_control_class(&class_name) {
+            return word_from_edit_line(hwnd, point);
+        }
         return None;
     }
     let mut text_buffer = vec![0_u16; text_len + 1];
@@ -379,11 +386,103 @@ fn word_from_edit_point(
     }
     let lparam = (((client.y as u16 as u32) << 16) | (client.x as u16 as u32)) as isize;
     let index =
-        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0;
+        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0
+            & 0xffff;
     if index < 0 {
         return None;
     }
     word_from_text_character_index(text, index as usize)
+}
+
+/// Reads only the hovered line from a control that hides its length from
+/// GetWindowTextLengthW (Windows 11 Notepad does this while still answering
+/// EM_CHARFROMPOS and WM_GETTEXT). Keeping this line-based avoids copying a
+/// whole document on every hover.
+#[cfg(windows)]
+fn word_from_edit_line(
+    hwnd: windows::Win32::Foundation::HWND,
+    point: (i32, i32),
+) -> Option<String> {
+    use windows::Win32::{
+        Foundation::{LPARAM, POINT, WPARAM},
+        Graphics::Gdi::ScreenToClient,
+        UI::{
+            Controls::{EM_CHARFROMPOS, EM_LINEFROMCHAR, EM_LINEINDEX, EM_LINELENGTH},
+            WindowsAndMessaging::{SendMessageW, WM_GETTEXT},
+        },
+    };
+
+    let mut client = POINT {
+        x: point.0,
+        y: point.1,
+    };
+    if !unsafe { ScreenToClient(hwnd, &mut client) }.as_bool() {
+        return None;
+    }
+    let lparam = (((client.y as u16 as u32) << 16) | (client.x as u16 as u32)) as isize;
+    let index =
+        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0
+            & 0xffff;
+    if index < 0 {
+        return None;
+    }
+    let line = unsafe {
+        SendMessageW(
+            hwnd,
+            EM_LINEFROMCHAR,
+            Some(WPARAM(index as usize)),
+            Some(LPARAM(0)),
+        )
+    }
+    .0;
+    if line < 0 {
+        return None;
+    }
+    let line_start = unsafe {
+        SendMessageW(
+            hwnd,
+            EM_LINEINDEX,
+            Some(WPARAM(line as usize)),
+            Some(LPARAM(0)),
+        )
+    }
+    .0;
+    if line_start < 0 || index < line_start {
+        return None;
+    }
+    let line_len = unsafe {
+        SendMessageW(
+            hwnd,
+            EM_LINELENGTH,
+            Some(WPARAM(line_start as usize)),
+            Some(LPARAM(0)),
+        )
+    }
+    .0;
+    if line_len <= 0 {
+        return None;
+    }
+    // WM_GETTEXT is the Unicode-safe path for this control; EM_GETLINE on
+    // Windows 11 Notepad returns ANSI bytes even through SendMessageW. Copy
+    // only the prefix through the hovered line, then slice that line out.
+    let line_start = line_start as usize;
+    let line_len = line_len as usize;
+    let capacity = line_start.saturating_add(line_len).saturating_add(2);
+    let mut buffer = vec![0_u16; capacity];
+    let copied = unsafe {
+        SendMessageW(
+            hwnd,
+            WM_GETTEXT,
+            Some(WPARAM(capacity)),
+            Some(LPARAM(buffer.as_mut_ptr() as isize)),
+        )
+    }
+    .0;
+    if copied <= 0 || (copied as usize) < line_start + line_len {
+        return None;
+    }
+    let line_text = String::from_utf16_lossy(&buffer[line_start..line_start + line_len]);
+    word_from_text_character_index(&line_text, (index as usize) - line_start)
 }
 
 fn word_from_text_character_index(text: &str, index: usize) -> Option<String> {
