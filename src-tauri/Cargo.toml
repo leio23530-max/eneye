@@ -61,3 +61,9 @@ winreg = "0.56"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Local copy adds exact-file MDX opening. Upstream `open(dir)` selects the
+# first .mdx in directory order, which can bind B to A when a folder contains
+# multiple dictionaries. Keep the MIT license beside the source.
+[patch.crates-io]
+opendict-rs = { path = "vendor/opendict-rs" }

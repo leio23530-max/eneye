@@ -48,6 +48,36 @@ describe("OverlayCard", () => {
     expect(accordion).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("groups multiple rows from the same secondary dictionary", async () => {
+    const user = userEvent.setup();
+    const lookup = {
+      ...SAMPLE_LOOKUP,
+      entries: [
+        SAMPLE_LOOKUP.entries[0],
+        {
+          dictionaryId: "grouped",
+          dictionaryName: "分组词典",
+          priority: 1,
+          definitions: ["first definition"],
+          examples: [],
+        },
+        {
+          dictionaryId: "grouped",
+          dictionaryName: "分组词典",
+          priority: 2,
+          definitions: ["second definition"],
+          examples: [],
+        },
+      ],
+    };
+    render(<OverlayCard lookup={lookup} settings={DEFAULT_SETTINGS} />);
+
+    const accordion = screen.getByRole("button", { name: "分组词典" });
+    await user.click(accordion);
+    expect(screen.getByText("first definition")).toBeVisible();
+    expect(screen.getByText("second definition")).toBeVisible();
+  });
+
   it("pins the card and reports the pinned state", async () => {
     const user = userEvent.setup();
     const onPinChange = vi.fn();

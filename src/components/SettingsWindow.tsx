@@ -9,9 +9,12 @@ import {
   deleteNotebook,
   detectAgentConnections,
   getCaptureDiagnostics,
+  getDictionaryRegistryError,
   listAiModels,
   listNotebooks,
   listNotebookWords,
+  relinkExternalDictionary,
+  reloadExternalDictionary,
   removeExternalDictionary,
   recordRecognitionCorrection,
   removeNotebookWord,
@@ -175,6 +178,10 @@ export function SettingsWindow({
   const [notebookQuery, setNotebookQuery] = useState("");
   const [notebookLoading, setNotebookLoading] = useState(false);
   const [notebookError, setNotebookError] = useState("");
+  const [dictionaryBusy, setDictionaryBusy] = useState(false);
+  const [dictionaryError, setDictionaryError] = useState("");
+  const [dictionaryNotice, setDictionaryNotice] = useState("");
+  const [dictionaryRegistryError, setDictionaryRegistryError] = useState("");
   const [creatingNotebook, setCreatingNotebook] = useState(false);
   const [newNotebookName, setNewNotebookName] = useState("");
   const [notebookSaving, setNotebookSaving] = useState(false);
@@ -215,6 +222,15 @@ export function SettingsWindow({
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onSettingsChange({ ...settings, [key]: value });
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    getDictionaryRegistryError()
+      .then((error) => {
+        if (error) setDictionaryRegistryError(error);
+      })
+      .catch(() => undefined);
+  }, []);
 
   function showSamplePreview() {
     window.clearTimeout(sampleHideTimer.current);
@@ -486,32 +502,108 @@ export function SettingsWindow({
   }
 
   async function importDictionary() {
-    if (!isTauriRuntime()) return;
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        {
-          name: "词典文件",
-          extensions: ["csv", "mdx", "ifo", "idx", "dict", "dz", "syn"],
-        },
-      ],
-    });
-    if (typeof selected !== "string") return;
-    const dictionary = await addExternalDictionary(selected);
-    onExternalDictionariesChange([...externalDictionaries, dictionary]);
+    if (!isTauriRuntime() || dictionaryBusy) return;
+    setDictionaryError("");
+    setDictionaryNotice("");
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "词典文件",
+            extensions: ["csv", "mdx", "ifo", "idx", "dict", "gz", "syn"],
+          },
+        ],
+      });
+      if (typeof selected !== "string") return;
+      setDictionaryBusy(true);
+      const dictionary = await addExternalDictionary(selected);
+      onExternalDictionariesChange([...externalDictionaries, dictionary]);
+      setDictionaryNotice(`已添加 ${dictionary.name}`);
+    } catch (error) {
+      setDictionaryError(String(error));
+    } finally {
+      setDictionaryBusy(false);
+    }
   }
 
-  async function removeDictionary(id: string) {
-    await removeExternalDictionary(id);
-    onExternalDictionariesChange(
-      externalDictionaries
-        .filter((dictionary) => dictionary.id !== id)
-        .map((dictionary, index) => ({ ...dictionary, priority: index })),
-    );
+  async function relinkDictionary(id: string) {
+    if (!isTauriRuntime() || dictionaryBusy) return;
+    setDictionaryError("");
+    setDictionaryNotice("");
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "词典文件",
+            extensions: ["csv", "mdx", "ifo", "idx", "dict", "gz", "syn"],
+          },
+        ],
+      });
+      if (typeof selected !== "string") return;
+      setDictionaryBusy(true);
+      const updated = await relinkExternalDictionary(id, selected);
+      onExternalDictionariesChange(
+        externalDictionaries.map((dictionary) =>
+          dictionary.id === id ? updated : dictionary,
+        ),
+      );
+      setDictionaryNotice(`已重新定位 ${updated.name}`);
+    } catch (error) {
+      setDictionaryError(String(error));
+    } finally {
+      setDictionaryBusy(false);
+    }
+  }
+
+  async function reloadDictionary(id: string) {
+    if (!isTauriRuntime() || dictionaryBusy) return;
+    setDictionaryError("");
+    setDictionaryNotice("");
+    try {
+      setDictionaryBusy(true);
+      const updated = await reloadExternalDictionary(id);
+      onExternalDictionariesChange(
+        externalDictionaries.map((dictionary) =>
+          dictionary.id === id ? updated : dictionary,
+        ),
+      );
+      setDictionaryNotice(`已重新加载 ${updated.name}`);
+    } catch (error) {
+      setDictionaryError(String(error));
+    } finally {
+      setDictionaryBusy(false);
+    }
+  }
+
+  async function removeDictionary(id: string, name: string) {
+    if (dictionaryBusy) return;
+    if (!window.confirm(`从列表中移除“${name}”？词典文件本身不会被删除。`)) {
+      return;
+    }
+    setDictionaryError("");
+    setDictionaryNotice("");
+    try {
+      setDictionaryBusy(true);
+      await removeExternalDictionary(id);
+      onExternalDictionariesChange(
+        externalDictionaries
+          .filter((dictionary) => dictionary.id !== id)
+          .map((dictionary, index) => ({ ...dictionary, priority: index })),
+      );
+      setDictionaryNotice(`已移除 ${name}`);
+    } catch (error) {
+      setDictionaryError(String(error));
+    } finally {
+      setDictionaryBusy(false);
+    }
   }
 
   async function moveDictionary(index: number, direction: -1 | 1) {
+    if (dictionaryBusy) return;
     const nextIndex = index + direction;
     if (nextIndex < 0 || nextIndex >= externalDictionaries.length) return;
     const reordered = [...externalDictionaries];
@@ -523,10 +615,19 @@ export function SettingsWindow({
       ...dictionary,
       priority,
     }));
-    onExternalDictionariesChange(withPriorities);
-    await reorderExternalDictionaries(
-      withPriorities.map((dictionary) => dictionary.id),
-    );
+    setDictionaryError("");
+    setDictionaryNotice("");
+    try {
+      setDictionaryBusy(true);
+      await reorderExternalDictionaries(
+        withPriorities.map((dictionary) => dictionary.id),
+      );
+      onExternalDictionariesChange(withPriorities);
+    } catch (error) {
+      setDictionaryError(String(error));
+    } finally {
+      setDictionaryBusy(false);
+    }
   }
 
   return (
@@ -777,12 +878,29 @@ export function SettingsWindow({
               </div>
               <button
                 className="secondary-button"
+                disabled={dictionaryBusy}
                 onClick={importDictionary}
                 type="button"
               >
                 <Icon name="folder" size={17} />
-                选择词典文件
+                {dictionaryBusy ? "正在读取词典…" : "选择词典文件"}
               </button>
+              {dictionaryRegistryError && (
+                <p className="inline-error" role="alert">
+                  词典列表读取失败，原文件已备份为 dictionaries.json.corrupt。
+                  {dictionaryRegistryError}
+                </p>
+              )}
+              {dictionaryError && (
+                <p className="inline-error" role="alert">
+                  {dictionaryError}
+                </p>
+              )}
+              {dictionaryNotice && (
+                <p className="inline-notice" role="status">
+                  {dictionaryNotice}
+                </p>
+              )}
               {externalDictionaries.length > 0 && (
                 <div className="external-dictionary-list">
                   {externalDictionaries.map((dictionary, index) => (
@@ -790,16 +908,24 @@ export function SettingsWindow({
                       <span className="dictionary-order">
                         {String(index + 1).padStart(2, "0")}
                       </span>
-                      <div>
+                      <div className="dictionary-copy">
                         <strong>{dictionary.name}</strong>
                         <span>
                           {dictionary.format.toUpperCase()} ·{" "}
-                          {dictionary.available ? "可用" : dictionary.error}
+                          {dictionary.available
+                            ? "可用"
+                            : dictionary.error || "不可用"}
+                        </span>
+                        <span
+                          className="dictionary-path"
+                          title={dictionary.path}
+                        >
+                          {dictionary.path}
                         </span>
                       </div>
                       <button
                         aria-label={`上移 ${dictionary.name}`}
-                        disabled={index === 0}
+                        disabled={index === 0 || dictionaryBusy}
                         onClick={() => moveDictionary(index, -1)}
                         type="button"
                       >
@@ -807,15 +933,39 @@ export function SettingsWindow({
                       </button>
                       <button
                         aria-label={`下移 ${dictionary.name}`}
-                        disabled={index === externalDictionaries.length - 1}
+                        disabled={
+                          index === externalDictionaries.length - 1 ||
+                          dictionaryBusy
+                        }
                         onClick={() => moveDictionary(index, 1)}
                         type="button"
                       >
                         ↓
                       </button>
                       <button
+                        aria-label={`重新定位 ${dictionary.name}`}
+                        disabled={dictionaryBusy}
+                        onClick={() => relinkDictionary(dictionary.id)}
+                        title="重新定位"
+                        type="button"
+                      >
+                        定位
+                      </button>
+                      <button
+                        aria-label={`重新加载 ${dictionary.name}`}
+                        disabled={dictionaryBusy}
+                        onClick={() => reloadDictionary(dictionary.id)}
+                        title="重新加载"
+                        type="button"
+                      >
+                        刷新
+                      </button>
+                      <button
                         aria-label={`移除 ${dictionary.name}`}
-                        onClick={() => removeDictionary(dictionary.id)}
+                        disabled={dictionaryBusy}
+                        onClick={() =>
+                          removeDictionary(dictionary.id, dictionary.name)
+                        }
                         type="button"
                       >
                         <Icon name="close" size={14} />
@@ -825,7 +975,8 @@ export function SettingsWindow({
                 </div>
               )}
               <p className="muted-paragraph">
-                外部词典按列表顺序优先展示。词典内容的授权由用户自行确认。
+                支持 CSV、MDX（可带同名 MDD）与 StarDict（选择 .ifo）。
+                词典文件保留原位置；移动文件后可点“定位”重新关联。外部词典按列表顺序优先展示，词典内容的授权由用户自行确认。
               </p>
             </section>
           </div>

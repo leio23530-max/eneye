@@ -621,8 +621,18 @@ select {
   border-bottom: 1px solid var(--line);
   display: grid;
   gap: 8px;
-  grid-template-columns: auto minmax(0, 1fr) repeat(3, 32px);
+  grid-template-columns: auto minmax(0, 1fr) repeat(5, auto);
   padding: 10px 0;
+}
+
+.dictionary-copy {
+  min-width: 0;
+}
+
+.dictionary-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .external-dictionary strong,
@@ -1642,6 +1652,18 @@ select {
   margin-left: 2px;
   vertical-align: -0.15em;
   width: 1.5px;
+}
+
+.inline-notice {
+  align-items: center;
+  background: var(--accent-soft);
+  border-radius: 8px;
+  color: var(--accent-strong);
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 8px 10px;
 }
 
 .inline-error {

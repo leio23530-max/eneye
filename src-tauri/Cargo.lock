@@ -3297,8 +3297,6 @@ dependencies = [
 [[package]]
 name = "opendict-rs"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61fe659e9ea3fd15411b79ca8e8e5a9153015022084d9502a6dbbeec50976005"
 dependencies = [
  "adler2",
  "encoding_rs",

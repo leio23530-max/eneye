@@ -4,6 +4,7 @@ import { Icon } from "./Icon";
 import { IconButton } from "./IconButton";
 import type {
   AppSettings,
+  DictionaryEntry,
   LookupResult,
   Notebook,
   TranslationState,
@@ -93,6 +94,25 @@ export function OverlayCard({
   } = useNearBottom(translation?.output);
   const main = lookup.entries[0];
   const others = lookup.entries.slice(1);
+  const otherGroups: Array<{
+    dictionaryId: string;
+    dictionaryName: string;
+    entries: DictionaryEntry[];
+  }> = [];
+  for (const entry of others) {
+    const existing = otherGroups.find(
+      (group) => group.dictionaryId === entry.dictionaryId,
+    );
+    if (existing) {
+      existing.entries.push(entry);
+    } else {
+      otherGroups.push({
+        dictionaryId: entry.dictionaryId,
+        dictionaryName: entry.dictionaryName,
+        entries: [entry],
+      });
+    }
+  }
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -353,19 +373,33 @@ export function OverlayCard({
         {others.length > 0 && (
           <section className="other-dictionaries">
             <p className="eyebrow">其他词典</p>
-            {others.map((entry) => {
-              const isOpen = expanded === entry.dictionaryId;
+            {otherGroups.map((group) => {
+              const isOpen = expanded === group.dictionaryId;
+              const definitions = group.entries.flatMap(
+                (entry) => entry.definitions,
+              );
+              const html = group.entries
+                .map((entry) => entry.html)
+                .filter((value): value is string => Boolean(value))
+                .join("\n");
+              const partsOfSpeech = Array.from(
+                new Set(
+                  group.entries
+                    .map((entry) => entry.partOfSpeech)
+                    .filter((value): value is string => Boolean(value)),
+                ),
+              );
               return (
-                <div className="dictionary-accordion" key={entry.dictionaryId}>
+                <div className="dictionary-accordion" key={group.dictionaryId}>
                   <button
                     aria-expanded={isOpen}
                     className="accordion-trigger"
                     onClick={() =>
-                      setExpanded(isOpen ? null : entry.dictionaryId)
+                      setExpanded(isOpen ? null : group.dictionaryId)
                     }
                     type="button"
                   >
-                    <span>{entry.dictionaryName}</span>
+                    <span>{group.dictionaryName}</span>
                     <Icon
                       className={isOpen ? "chevron is-open" : "chevron"}
                       name="chevron"
@@ -373,16 +407,24 @@ export function OverlayCard({
                     />
                   </button>
                   <div className="accordion-content" data-open={isOpen}>
-                    <div>
-                      {entry.partOfSpeech && (
-                        <span className="part-of-speech">
-                          {entry.partOfSpeech}
-                        </span>
-                      )}
-                      {entry.definitions.map((definition) => (
-                        <p key={definition}>{definition}</p>
-                      ))}
-                    </div>
+                    {html ? (
+                      <DictionarySenseList
+                        definitions={definitions}
+                        dictionaryId={group.dictionaryId}
+                        html={html}
+                      />
+                    ) : (
+                      <div>
+                        {partsOfSpeech.length > 0 && (
+                          <span className="part-of-speech">
+                            {partsOfSpeech.join(" / ")}
+                          </span>
+                        )}
+                        {definitions.map((definition, index) => (
+                          <p key={definition + "-" + index}>{definition}</p>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               );

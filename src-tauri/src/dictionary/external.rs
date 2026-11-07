@@ -115,7 +115,8 @@ impl LoadedExternalDictionary {
 
     pub fn lookup(&self, word: &str) -> Vec<DictionaryEntry> {
         let mut seen = std::collections::HashSet::new();
-        self.lookup_with_redirects(word, 0, word)
+        let mut visited = std::collections::HashSet::new();
+        self.lookup_with_redirects(word, 0, word, word, &mut visited)
             .into_iter()
             .filter(|entry| {
                 let key = entry
@@ -132,18 +133,27 @@ impl LoadedExternalDictionary {
         word: &str,
         depth: u8,
         requested: &str,
+        selection: &str,
+        visited: &mut std::collections::HashSet<String>,
     ) -> Vec<DictionaryEntry> {
         let Some(reader) = &self.reader else {
             return Vec::new();
         };
         match reader {
             Reader::OpenDict(dictionary) => {
-                let entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
-                self.resolve_entries(entries, depth, requested)
+                let mut entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
+                if entries.is_empty() {
+                    entries = dictionary
+                        .lookup_synonym(word)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                }
+                self.resolve_entries(entries, depth, requested, selection, visited)
             }
             Reader::Mdict(dictionary) => {
                 let entries = dictionary.lookup(word).ok().flatten().unwrap_or_default();
-                self.resolve_entries(entries, depth, requested)
+                self.resolve_entries(entries, depth, requested, selection, visited)
             }
             Reader::Csv(csv) => csv
                 .entries
@@ -173,27 +183,77 @@ impl LoadedExternalDictionary {
         entries: Vec<DictEntry>,
         depth: u8,
         requested: &str,
+        selection: &str,
+        visited: &mut std::collections::HashSet<String>,
     ) -> Vec<DictionaryEntry> {
         const MAX_REDIRECT_DEPTH: u8 = 4;
         let mut resolved = Vec::new();
         for entry in entries {
-            if depth < MAX_REDIRECT_DEPTH
-                && let Some(target) = redirect_target(&entry.data)
-            {
-                let mut followed = self.lookup_with_redirects(&target, depth + 1, requested);
-                if !followed.is_empty() {
-                    for item in &mut followed {
-                        item.priority = item.priority.saturating_add(1000);
-                        item.dictionary_name =
-                            format!("{}（{} 原形）", item.dictionary_name, target);
-                    }
-                    resolved.extend(followed);
-                    continue;
-                }
+            let Some(target) = redirect_target(&entry.data) else {
+                resolved.push(from_open_dict_entry(&self.metadata, entry, selection));
+                continue;
+            };
+            if depth >= MAX_REDIRECT_DEPTH {
+                resolved.push(notice_entry(
+                    &self.metadata,
+                    format!("重定向层级过深，已停止解析：{target}"),
+                ));
+                continue;
             }
-            resolved.push(from_open_dict_entry(&self.metadata, entry, requested));
+            let key = normalize(&target);
+            if !visited.insert(key.clone()) {
+                resolved.push(notice_entry(
+                    &self.metadata,
+                    format!("重定向循环，已停止解析：{target}"),
+                ));
+                continue;
+            }
+            let followed =
+                self.lookup_with_redirects(&target, depth + 1, requested, &target, visited);
+            if followed.is_empty() {
+                resolved.push(notice_entry(
+                    &self.metadata,
+                    format!("重定向目标不存在：{target}"),
+                ));
+                continue;
+            }
+            for mut item in followed {
+                // One step below a direct hit, not a magic +1000 that pushes
+                // the alias behind every other dictionary and gets truncated.
+                item.priority = item.priority.saturating_add(1);
+                item.dictionary_name = format!("{}（{} 原形）", item.dictionary_name, target);
+                resolved.push(item);
+            }
         }
         resolved
+    }
+
+    pub fn relink(&mut self, path: PathBuf) -> Result<()> {
+        let loaded = Self::open(path);
+        if !loaded.metadata.available {
+            anyhow::bail!(
+                "{}",
+                loaded.metadata.error.as_deref().unwrap_or("无法读取词典")
+            );
+        }
+        if loaded.entry_count() == 0 {
+            anyhow::bail!("词典没有可读取的词条");
+        }
+        self.reader = loaded.reader;
+        self.metadata.path = loaded.metadata.path;
+        self.metadata.format = loaded.metadata.format;
+        self.metadata.available = true;
+        self.metadata.error = None;
+        Ok(())
+    }
+
+    pub fn entry_count(&self) -> usize {
+        match &self.reader {
+            Some(Reader::OpenDict(dictionary)) => dictionary.word_count(),
+            Some(Reader::Mdict(dictionary)) => dictionary.info().word_count,
+            Some(Reader::Csv(csv)) => csv.entries.len(),
+            None => 0,
+        }
     }
 
     pub fn resource(&self, path: &str) -> Option<Vec<u8>> {
@@ -217,18 +277,20 @@ fn load_reader(path: &Path, format: &str) -> Result<(Reader, String)> {
             ))
         }
         "mdx" => {
-            let directory = path.parent().context("MDX 没有父目录")?;
-            let dictionary = MdictDictionary::open(directory)
+            // Bind this registry row to the exact file the user selected. The
+            // upstream directory scan can silently choose a sibling MDX.
+            let dictionary = MdictDictionary::open_file(path)
                 .context("无法读取 MDX/MDD，请检查词典是否加密或受损")?;
             let name = dictionary.info().name.clone();
             Ok((Reader::Mdict(Box::new(dictionary)), name))
         }
         "stardict" => {
+            let name = stardict_stem(path).context("StarDict 文件名无效")?;
             let directory = path.parent().context("StarDict 没有父目录")?;
-            let dictionary =
-                StarDictDictionary::open_dir(directory).context("无法读取 StarDict 词典")?;
-            let name = dictionary.info().name.clone();
-            Ok((Reader::OpenDict(Box::new(dictionary)), name))
+            let dictionary = StarDictDictionary::open(directory, &name)
+                .context("无法读取 StarDict 词典，请检查 .ifo/.idx/.dict 是否齐全")?;
+            let display = dictionary.info().name.clone();
+            Ok((Reader::OpenDict(Box::new(dictionary)), display))
         }
         "open-dict" => {
             let directory = path.parent().context("词典没有父目录")?;
@@ -241,6 +303,10 @@ fn load_reader(path: &Path, format: &str) -> Result<(Reader, String)> {
 }
 
 fn dictionary_format(path: &Path) -> Option<&'static str> {
+    let file_name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if file_name.ends_with(".idx.gz") || file_name.ends_with(".dict.dz") {
+        return Some("stardict");
+    }
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
         "csv" => Some("csv"),
@@ -248,6 +314,20 @@ fn dictionary_format(path: &Path) -> Option<&'static str> {
         "ifo" | "idx" | "dict" | "dz" | "syn" => Some("stardict"),
         _ => None,
     }
+}
+
+/// Derive the shared StarDict basename from any one of its files.
+fn stardict_stem(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    let lower = file_name.to_ascii_lowercase();
+    for suffix in [".idx.gz", ".dict.dz", ".ifo", ".idx", ".dict", ".syn"] {
+        if lower.ends_with(suffix) {
+            let end = file_name.len() - suffix.len();
+            let stem = &file_name[..end];
+            return (!stem.is_empty()).then(|| stem.to_owned());
+        }
+    }
+    None
 }
 
 fn redirect_target(data: &[u8]) -> Option<String> {
@@ -390,6 +470,20 @@ fn extract_form_phonetic(html: &str, requested: &str) -> Option<String> {
     None
 }
 
+fn notice_entry(metadata: &ExternalDictionary, message: String) -> DictionaryEntry {
+    DictionaryEntry {
+        dictionary_id: metadata.id.clone(),
+        dictionary_name: metadata.name.clone(),
+        priority: metadata.priority,
+        phonetic: None,
+        part_of_speech: None,
+        definitions: vec![message],
+        inflections: None,
+        examples: Vec::new(),
+        html: None,
+    }
+}
+
 fn from_open_dict_entry(
     metadata: &ExternalDictionary,
     entry: DictEntry,
@@ -501,7 +595,6 @@ pub fn html_to_lines(html: &str) -> Vec<String> {
                 }
             }
             _ if in_tag => {}
-            '&' => text.push(' '),
             character if character.is_whitespace() => {
                 if !previous_space {
                     text.push(' ');
@@ -518,7 +611,9 @@ pub fn html_to_lines(html: &str) -> Vec<String> {
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
-        .replace("&gt;", ">");
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
     let words = text.split_whitespace().collect::<Vec<_>>();
     words
         .chunks(16)
@@ -530,9 +625,91 @@ pub fn html_to_lines(html: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::{
+        collections::HashMap,
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
+    use opendict::{DictEntry, DictInfo};
 
     use super::*;
+
+    struct FakeDictionary {
+        entries: HashMap<String, Vec<DictEntry>>,
+        info: DictInfo,
+    }
+
+    impl OpenDictionary for FakeDictionary {
+        fn lookup(&self, word: &str) -> opendict::Result<Option<Vec<DictEntry>>> {
+            Ok(self.entries.get(&normalize(word)).cloned())
+        }
+
+        fn lookup_synonym(&self, _word: &str) -> opendict::Result<Option<Vec<DictEntry>>> {
+            Ok(None)
+        }
+
+        fn word_list(&self) -> Vec<&str> {
+            Vec::new()
+        }
+
+        fn word_count(&self) -> usize {
+            self.entries.len()
+        }
+
+        fn info(&self) -> &DictInfo {
+            &self.info
+        }
+
+        fn search_prefix(&self, _prefix: &str, _limit: usize) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn fake_dictionary(entries: &[(&str, &str)]) -> LoadedExternalDictionary {
+        let entries = entries
+            .iter()
+            .map(|(word, data)| {
+                (
+                    normalize(word),
+                    vec![DictEntry::new('h', data.as_bytes().to_vec())],
+                )
+            })
+            .collect();
+        LoadedExternalDictionary {
+            metadata: ExternalDictionary {
+                id: "fake".into(),
+                name: "测试词典".into(),
+                path: PathBuf::from("fake.mdx"),
+                format: "mdx".into(),
+                priority: 5,
+                available: true,
+                error: None,
+            },
+            reader: Some(Reader::OpenDict(Box::new(FakeDictionary {
+                entries,
+                info: DictInfo::default(),
+            }))),
+        }
+    }
+
+    fn copy_stardict(
+        source: &Path,
+        destination_dir: &Path,
+        source_stem: &str,
+        destination_stem: &str,
+    ) {
+        for suffix in [".ifo", ".idx", ".dict", ".dict.dz", ".syn"] {
+            let from = source.join(format!("{source_stem}{suffix}"));
+            if from.exists() {
+                std::fs::copy(
+                    &from,
+                    destination_dir.join(format!("{destination_stem}{suffix}")),
+                )
+                .unwrap();
+            }
+        }
+    }
 
     #[test]
     fn imports_both_ecdict_and_simple_csv_files() {
@@ -591,6 +768,134 @@ mod tests {
             Some("/went/")
         );
         assert_eq!(extract_form_phonetic(html, "go"), None);
+    }
+
+    #[test]
+    fn follows_a_redirect_into_the_targets_own_headword() {
+        let loaded = fake_dictionary(&[
+            ("a", "@@@LINK=b"),
+            (
+                "b",
+                r#"<div class="entry"><h1 class="headword">bee</h1><span class="phon">/biː/</span>a flying insect</div>"#,
+            ),
+        ]);
+        let entries = loaded.lookup("a");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].priority, 6);
+        assert!(entries[0].dictionary_name.contains("b 原形"));
+        let html = entries[0].html.as_deref().unwrap();
+        assert!(html.contains("bee"));
+        assert!(!html.contains("@@@LINK"));
+    }
+
+    #[test]
+    fn reports_redirect_cycles_instead_of_raw_links() {
+        let loaded = fake_dictionary(&[("a", "@@@LINK=b"), ("b", "@@@LINK=a")]);
+        let entries = loaded.lookup("a");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].definitions[0].contains("重定向循环"));
+        assert!(entries[0].html.is_none());
+    }
+
+    #[test]
+    fn reports_a_missing_redirect_target() {
+        let loaded = fake_dictionary(&[("a", "@@@LINK=missing")]);
+        let entries = loaded.lookup("a");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].definitions[0].contains("不存在"));
+        assert!(entries[0].definitions[0].contains("missing"));
+    }
+
+    #[test]
+    fn reports_redirect_depth_in_plain_language() {
+        let loaded = fake_dictionary(&[
+            ("a", "@@@LINK=b"),
+            ("b", "@@@LINK=c"),
+            ("c", "@@@LINK=d"),
+            ("d", "@@@LINK=e"),
+            ("e", "@@@LINK=f"),
+        ]);
+        let entries = loaded.lookup("a");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.definitions[0].contains("层级过深"))
+        );
+    }
+
+    #[test]
+    fn decodes_html_entities_once_and_keeps_ampersands() {
+        let lines = html_to_lines("<p>A &amp; B &lt;tag&gt; &nbsp; C</p>");
+        assert_eq!(lines, vec!["A & B <tag> C"]);
+    }
+
+    #[test]
+    fn binds_an_mdx_row_to_the_exact_selected_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("test.mdx");
+        std::fs::write(directory.path().join("aaa.mdx"), b"not an mdx").unwrap();
+        std::fs::copy(fixture, directory.path().join("zzz.mdx")).unwrap();
+        let loaded = LoadedExternalDictionary::open(directory.path().join("zzz.mdx"));
+        assert!(loaded.metadata.available, "{:?}", loaded.metadata.error);
+        let entries = loaded.lookup("foo");
+        assert_eq!(entries[0].definitions, vec!["bar"]);
+    }
+
+    #[test]
+    fn binds_a_stardict_row_to_the_exact_stem() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures");
+        copy_stardict(&fixtures, directory.path(), "testdict", "aaa");
+        copy_stardict(&fixtures, directory.path(), "multitype", "zzz");
+        let loaded = LoadedExternalDictionary::open(directory.path().join("zzz.ifo"));
+        assert!(loaded.metadata.available, "{:?}", loaded.metadata.error);
+        let entries = loaded.lookup("hello");
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].html.as_deref().unwrap().contains("hello"));
+    }
+
+    #[test]
+    fn follows_stardict_synonyms_when_the_headword_is_missing() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("testdict.ifo");
+        let loaded = LoadedExternalDictionary::open(fixture);
+        let entries = loaded.lookup("abc");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].definitions, vec!["a translation"]);
+    }
+
+    #[test]
+    fn reports_a_non_empty_entry_count_for_import_gating() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("test.mdx");
+        let loaded = LoadedExternalDictionary::open(fixture);
+        assert_eq!(loaded.entry_count(), 3);
+    }
+
+    #[test]
+    fn recognizes_compressed_stardict_parts() {
+        assert_eq!(dictionary_format(Path::new("foo.idx.gz")), Some("stardict"));
+        assert_eq!(
+            dictionary_format(Path::new("foo.dict.dz")),
+            Some("stardict")
+        );
+        assert_eq!(
+            stardict_stem(Path::new("foo.idx.gz")).as_deref(),
+            Some("foo")
+        );
+        assert_eq!(
+            stardict_stem(Path::new("foo.dict.dz")).as_deref(),
+            Some("foo")
+        );
     }
 
     #[test]

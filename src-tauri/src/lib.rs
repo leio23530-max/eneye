@@ -386,6 +386,15 @@ fn list_external_dictionaries(
 }
 
 #[tauri::command]
+fn dictionary_registry_error(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state
+        .dictionary
+        .lock()
+        .map_err(|_| "dictionary lock is poisoned".to_owned())?
+        .registry_error())
+}
+
+#[tauri::command]
 fn add_external_dictionary(
     path: String,
     state: State<'_, AppState>,
@@ -395,6 +404,33 @@ fn add_external_dictionary(
         .lock()
         .map_err(|_| "dictionary lock is poisoned".to_owned())?
         .add_external(PathBuf::from(path))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn relink_external_dictionary(
+    id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ExternalDictionary, String> {
+    state
+        .dictionary
+        .lock()
+        .map_err(|_| "dictionary lock is poisoned".to_owned())?
+        .relink_external(&id, PathBuf::from(path))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reload_external_dictionary(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<ExternalDictionary, String> {
+    state
+        .dictionary
+        .lock()
+        .map_err(|_| "dictionary lock is poisoned".to_owned())?
+        .reload_external(&id)
         .map_err(|error| error.to_string())
 }
 
@@ -791,7 +827,10 @@ pub fn run() {
             get_capture_diagnostics,
             record_recognition_correction,
             list_external_dictionaries,
+            dictionary_registry_error,
             add_external_dictionary,
+            relink_external_dictionary,
+            reload_external_dictionary,
             remove_external_dictionary,
             reorder_external_dictionaries,
             get_dictionary_resource,

@@ -3,10 +3,11 @@ mod external;
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -31,11 +32,21 @@ pub struct DictionaryManager {
     status: DictionaryStatus,
     external: Vec<LoadedExternalDictionary>,
     registry_path: PathBuf,
+    registry_error: Option<String>,
 }
 
 impl DictionaryManager {
     pub fn open(path: PathBuf, registry_path: PathBuf) -> Self {
-        let external_configs = load_registry(&registry_path).unwrap_or_default();
+        let (external_configs, registry_error) = match load_registry(&registry_path) {
+            Ok(configs) => (configs, None),
+            Err(error) => {
+                eprintln!(
+                    "failed to read dictionary registry {}: {error}",
+                    registry_path.display()
+                );
+                (Vec::new(), Some(error.to_string()))
+            }
+        };
         let mut external = external_configs
             .into_iter()
             .map(LoadedExternalDictionary::from_metadata)
@@ -55,6 +66,7 @@ impl DictionaryManager {
                     },
                     external,
                     registry_path,
+                    registry_error,
                 }
             }
             Err(error) => Self {
@@ -68,8 +80,13 @@ impl DictionaryManager {
                 },
                 external,
                 registry_path,
+                registry_error,
             },
         }
+    }
+
+    pub fn registry_error(&self) -> Option<String> {
+        self.registry_error.clone()
     }
 
     pub fn status(&self) -> DictionaryStatus {
@@ -150,6 +167,14 @@ impl DictionaryManager {
     }
 
     pub fn add_external(&mut self, path: PathBuf) -> Result<ExternalDictionary> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if self
+            .external
+            .iter()
+            .any(|dictionary| dictionary.metadata.path == canonical)
+        {
+            anyhow::bail!("这本词典已经添加过了");
+        }
         let mut dictionary = LoadedExternalDictionary::open(path);
         if !dictionary.metadata.available {
             anyhow::bail!(
@@ -160,6 +185,9 @@ impl DictionaryManager {
                     .as_deref()
                     .unwrap_or("无法读取词典")
             );
+        }
+        if dictionary.entry_count() == 0 {
+            anyhow::bail!("词典没有可读取的词条，导入已取消");
         }
         dictionary.metadata.priority = self.external.len() as i32;
         let metadata = dictionary.metadata.clone();
@@ -178,6 +206,28 @@ impl DictionaryManager {
             self.persist_external()?;
         }
         Ok(removed)
+    }
+
+    pub fn relink_external(&mut self, id: &str, path: PathBuf) -> Result<ExternalDictionary> {
+        let dictionary = self
+            .external
+            .iter_mut()
+            .find(|dictionary| dictionary.metadata.id == id)
+            .context("找不到要重新定位的词典")?;
+        dictionary.relink(path)?;
+        let metadata = dictionary.metadata.clone();
+        self.persist_external()?;
+        Ok(metadata)
+    }
+
+    pub fn reload_external(&mut self, id: &str) -> Result<ExternalDictionary> {
+        let path = self
+            .external
+            .iter()
+            .find(|dictionary| dictionary.metadata.id == id)
+            .map(|dictionary| dictionary.metadata.path.clone())
+            .context("找不到要重新加载的词典")?;
+        self.relink_external(id, path)
     }
 
     pub fn reorder_external(&mut self, ids: &[String]) -> Result<()> {
@@ -219,10 +269,11 @@ impl DictionaryManager {
         }
         let content = serde_json::to_vec_pretty(&self.list_external())?;
         let temporary = self.registry_path.with_extension("json.tmp");
-        fs::write(&temporary, content)?;
-        if self.registry_path.exists() {
-            fs::remove_file(&self.registry_path)?;
-        }
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&content)?;
+        file.sync_all()?;
+        // `rename` replaces the destination atomically on both Windows and
+        // Unix. The previous remove-then-rename left a window with no registry.
         fs::rename(temporary, &self.registry_path)?;
         Ok(())
     }
@@ -359,7 +410,14 @@ fn load_registry(path: &Path) -> Result<Vec<ExternalDictionary>> {
         return Ok(Vec::new());
     }
     let content = fs::read(path)?;
-    Ok(serde_json::from_slice(&content)?)
+    match serde_json::from_slice(&content) {
+        Ok(registry) => Ok(registry),
+        Err(error) => {
+            let backup = path.with_extension("json.corrupt");
+            let _ = fs::copy(path, &backup);
+            Err(error.into())
+        }
+    }
 }
 
 fn safe_resource_path(path: &str) -> bool {
@@ -438,6 +496,86 @@ mod tests {
         let result = manager.search("美丽").unwrap();
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.entries[0].definitions, vec!["beautiful"]);
+    }
+
+    #[test]
+    fn rejects_duplicate_and_empty_dictionaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let csv_path = directory.path().join("good.csv");
+        std::fs::write(&csv_path, "word,translation\nalpha,first\n").unwrap();
+        let registry_path = directory.path().join("dictionaries.json");
+        let mut manager = DictionaryManager::open(
+            directory.path().join("missing.sqlite"),
+            registry_path.clone(),
+        );
+
+        let added = manager.add_external(csv_path.clone()).unwrap();
+        assert_eq!(added.priority, 0);
+
+        let error = manager
+            .add_external(csv_path.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("已经添加过"), "{error}");
+
+        let empty_path = directory.path().join("empty.csv");
+        std::fs::write(&empty_path, "word,translation\n").unwrap();
+        let error = manager.add_external(empty_path).unwrap_err().to_string();
+        assert!(error.contains("没有可读取的词条"), "{error}");
+
+        let registry: Vec<ExternalDictionary> =
+            serde_json::from_slice(&std::fs::read(registry_path).unwrap()).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry[0].path, csv_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn reloads_and_relinks_external_dictionaries_in_place() {
+        let directory = tempfile::tempdir().unwrap();
+        let csv_path = directory.path().join("moving.csv");
+        std::fs::write(&csv_path, "word,translation\nalpha,first\n").unwrap();
+        let registry_path = directory.path().join("dictionaries.json");
+        let mut manager =
+            DictionaryManager::open(directory.path().join("missing.sqlite"), registry_path);
+
+        let added = manager.add_external(csv_path.clone()).unwrap();
+        assert_eq!(manager.search("alpha").unwrap().entries.len(), 1);
+
+        std::fs::write(&csv_path, "word,translation\nbeta,second\n").unwrap();
+        let reloaded = manager.reload_external(&added.id).unwrap();
+        assert!(reloaded.available);
+        assert!(manager.search("alpha").unwrap().entries.is_empty());
+        assert_eq!(manager.search("beta").unwrap().entries.len(), 1);
+
+        let moved_path = directory.path().join("moved.csv");
+        std::fs::rename(&csv_path, &moved_path).unwrap();
+        let relinked = manager
+            .relink_external(&added.id, moved_path.clone())
+            .unwrap();
+        assert_eq!(relinked.id, added.id);
+        assert_eq!(relinked.name, added.name);
+        assert_eq!(relinked.path, moved_path.canonicalize().unwrap());
+        assert_eq!(manager.search("beta").unwrap().entries.len(), 1);
+
+        let error = manager
+            .relink_external(&added.id, directory.path().join("missing.csv"))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn backs_up_a_corrupt_dictionary_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry_path = directory.path().join("dictionaries.json");
+        std::fs::write(&registry_path, b"{not valid json").unwrap();
+        let manager = DictionaryManager::open(
+            directory.path().join("missing.sqlite"),
+            registry_path.clone(),
+        );
+        assert!(manager.list_external().is_empty());
+        assert!(manager.registry_error().is_some());
+        assert!(registry_path.with_extension("json.corrupt").exists());
     }
 
     #[test]

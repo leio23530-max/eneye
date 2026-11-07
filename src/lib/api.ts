@@ -274,6 +274,11 @@ export async function recordRecognitionCorrection(correction: {
   await invoke("record_recognition_correction", { correction });
 }
 
+export async function getDictionaryRegistryError(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>("dictionary_registry_error");
+}
+
 export async function addExternalDictionary(
   path: string,
 ): Promise<ExternalDictionary> {
@@ -293,6 +298,43 @@ export async function addExternalDictionary(
     };
   }
   return invoke<ExternalDictionary>("add_external_dictionary", { path });
+}
+
+export async function relinkExternalDictionary(
+  id: string,
+  path: string,
+): Promise<ExternalDictionary> {
+  if (!isTauriRuntime()) {
+    return {
+      id,
+      name:
+        path
+          .split(/[\\/]/)
+          .pop()
+          ?.replace(/\.[^.]+$/, "") ?? "词典",
+      path,
+      format: path.split(".").pop() ?? "unknown",
+      priority: 0,
+      available: true,
+    };
+  }
+  return invoke<ExternalDictionary>("relink_external_dictionary", { id, path });
+}
+
+export async function reloadExternalDictionary(
+  id: string,
+): Promise<ExternalDictionary> {
+  if (!isTauriRuntime()) {
+    return {
+      id,
+      name: "词典",
+      path: "",
+      format: "unknown",
+      priority: 0,
+      available: true,
+    };
+  }
+  return invoke<ExternalDictionary>("reload_external_dictionary", { id });
 }
 
 export async function removeExternalDictionary(id: string): Promise<boolean> {
