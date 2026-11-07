@@ -34,7 +34,7 @@
 
 最终安装版连接真实 Windows 11 记事本：
 
-- 进程 pid 5656，主窗口 hwnd 133878，子控件 class 为 `Edit`，hwnd 133874，物理矩形 `308,231,1292,530`。
+- 进程 pid 5656，主窗口 hwnd 133878，子控件 class 为 `Edit`，hwnd 133874；验收脚本把窗口移到 `200,120`，Edit 左上角为 `208,171`。
 - `GetWindowTextLengthW` 返回 0，`GetWindowTextW` 返回空；因此实际走 `WM_GETTEXT` 整段文本，再用 `EM_CHARFROMPOS` / `EM_POSFROMCHAR` 把屏幕坐标映射到字符。
 - 文本 120 字符、3 行：
 
@@ -44,18 +44,18 @@ China declared a "war on pollution" and
 less linear circular identification nanogenerator
 ```
 
-最终 sweep 结果（脚本 `F:\DSH\tmp\p0-notepad-full.ps1`，完整日志 `F:\DSH\tmp\p0-full-results.txt`）：
+最终 sweep 结果（脚本 `F:\DSH\tmp\validate-notepad-card.ps1`，每张都是 `1700x1000` 全帧，同时包含记事本文本和卡片；汇总见 `p0-notepad-valid-results.txt`）：
 
-| 目标 | 测试点 | 结果 | 截图 |
+| 目标 | 字符索引（CRLF） | 结果 | 截图 |
 | --- | --- | --- | --- |
-| `pollution` 第 1–9 个字母 | 698..818, 273 | 9/9 都显示一行 headword `pollution` | `F:\DSH\tmp\p0-full-pollution-55.png` … `-63.png` |
-| `being` 第 1–5 个字母 | 398..458, 241 | 5/5 都显示 `being`（OALD `be` 原形） | `F:\DSH\tmp\p0-full-being-5.png` … `-9.png` |
-| `war` b/w/a/r | 592/608/622, 273 | 3/3 都显示 `war` | `F:\DSH\tmp\p0-full-war-48.png` … `-50.png` |
-| `on` o/n | 652/668, 273 | 2/2 都显示 `on` | `F:\DSH\tmp\p0-full-on-52.png`、`-53.png` |
-| 空白（空格） | 382, 241 | 不出卡 | `F:\DSH\tmp\p0-full-blank-4.png` |
-| 题号/左括号 `)` | 338, 241 | 不出卡 | `F:\DSH\tmp\p0-full-marker-1.png` |
+| `pollution` 第 1–9 个字母 | 55..63 | 9/9 显示一行 headword `pollution` | `F:\DSH\tmp\p0-notepad-valid-pollution-55.png` … `-63.png`；汇总 `F:\DSH\tmp\sheet-pollution.png` |
+| `being` 第 1–5 个字母 | 5..9 | 5/5 显示 `being`（OALD `be` 原形） | `F:\DSH\tmp\p0-notepad-valid-being-5.png` … `-9.png`；汇总 `F:\DSH\tmp\sheet-motion.png` |
+| `war` w/a/r | 48/49/50 | 3/3 显示 `war` | `F:\DSH\tmp\p0-notepad-valid-war-48.png` … `-50.png`；汇总 `F:\DSH\tmp\sheet-motion.png` |
+| `on` o/n | 52/53 | 2/2 显示 `on` | `F:\DSH\tmp\p0-notepad-valid-on-52.png`、`-53.png`；汇总 `F:\DSH\tmp\sheet-motion.png` |
+| 空白（As 后空格） | 4 | 不出卡 | `F:\DSH\tmp\p0-notepad-valid-blank-4.png`；汇总 `F:\DSH\tmp\sheet-motion.png` |
+| 题号/左括号 `)` | 1 | 不出卡 | `F:\DSH\tmp\p0-notepad-valid-marker-1.png`；汇总 `F:\DSH\tmp\sheet-motion.png` |
 
-每次测试都校验：光标读回值等于目标点、`WindowFromPoint` 的 pid 为 5656、overlay 可见且位于目标点附近。汇总图：`F:\DSH\tmp\p0-final-build-sheet.png`。
+每次测试都校验：目标点由 `EM_POSFROMCHAR` 的字符左边界加 6px 得到、光标读回值等于目标点、`WindowFromPoint` 的 pid 为 5656、overlay 在目标点附近。注意记事本使用 CRLF：`war` 的 `w` 是索引 48（索引 47 是前引号），因此旧截图里的 47 只落在引号上。用户点名的四个 `p0-notepad-*.png` 已用全帧重拍并覆盖；旧 `p0-full-*` 是 380x570 裁剪图，只留作历史，不再作为验收证据。
 
 ### 3.2 Chrome 普通网页
 
