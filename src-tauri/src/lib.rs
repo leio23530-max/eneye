@@ -678,7 +678,7 @@ fn show_settings(app: tauri::AppHandle) {
 fn create_overlay(app: &tauri::App) -> tauri::Result<()> {
     WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
         .title("Eneye")
-        .inner_size(336.0, 536.0)
+        .inner_size(376.0, 536.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)

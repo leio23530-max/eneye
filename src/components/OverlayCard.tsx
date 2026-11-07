@@ -14,6 +14,7 @@ import { addWordToNotebook, listNotebooks } from "../lib/api";
 import { isTauriRuntime } from "../lib/tauri";
 import { DictionarySenseList } from "./DictionarySenseList";
 import { PhoneticLines } from "./PhoneticLines";
+import { headwordFontSize } from "../lib/text";
 
 interface OverlayCardProps {
   lookup: LookupResult;
@@ -214,7 +215,12 @@ export function OverlayCard({
       <header className="card-header" onMouseDown={startDragging}>
         <div className="headword-row">
           <div>
-            <h1 className="headword">{lookup.word}</h1>
+            <h1
+              className="headword"
+              style={{ fontSize: headwordFontSize(lookup.word) }}
+            >
+              {lookup.word}
+            </h1>
             <div className="pronunciation-row">
               <PhoneticLines value={main?.phonetic} />
               <button

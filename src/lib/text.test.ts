@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { cleanHoveredWord, isUsableSelection, normalizeHeadword } from "./text";
+import {
+  cleanHoveredWord,
+  headwordFontSize,
+  isUsableSelection,
+  normalizeHeadword,
+} from "./text";
 
 describe("text helpers", () => {
   it("cleans punctuation around a hovered word", () => {
@@ -14,6 +19,14 @@ describe("text helpers", () => {
 
   it("normalizes headwords without changing the display form", () => {
     expect(normalizeHeadword("Don’t")).toBe("don't");
+  });
+
+  it("shrinks long headwords so they stay on one line", () => {
+    expect(headwordFontSize("word")).toBe(30);
+    expect(headwordFontSize("pollution")).toBe(30);
+    expect(headwordFontSize("nanogenerator")).toBe(22);
+    expect(headwordFontSize("identification")).toBe(20);
+    expect(headwordFontSize("internationalization")).toBe(14);
   });
 
   it("auto-translates a sentence but not one word or a URL", () => {

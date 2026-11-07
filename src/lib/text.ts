@@ -16,6 +16,13 @@ export function normalizeHeadword(raw: string): string {
   return raw.trim().replace(/’/g, "'").toLocaleLowerCase("en-US");
 }
 
+// The card has a fixed measured width, so long headwords must shrink instead of
+// wrapping in the middle of a word.
+export function headwordFontSize(word: string): number {
+  const length = Array.from(word).length;
+  return Math.max(12, Math.min(30, Math.floor(287 / Math.max(1, length))));
+}
+
 export function isUsableSelection(raw: string): boolean {
   const text = raw.trim().replace(/\s+/g, " ");
   if (!text || text.length > 2000 || URL_LIKE.test(text)) return false;

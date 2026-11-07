@@ -809,7 +809,7 @@ fn captures_escape(mode: OverlayMode) -> bool {
 }
 
 const CARD_STAGE_PADDING: f64 = 8.0;
-const DEFAULT_CARD_WIDTH: f64 = 320.0;
+const DEFAULT_CARD_WIDTH: f64 = 360.0;
 const DEFAULT_CARD_HEIGHT: f64 = 520.0;
 const CARD_GAP: i32 = 12;
 

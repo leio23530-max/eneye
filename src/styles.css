@@ -1354,7 +1354,7 @@ select {
   max-height: 520px;
   overflow: hidden;
   position: relative;
-  width: 320px;
+  width: 360px;
 }
 
 .card-header {
@@ -1376,7 +1376,8 @@ select {
   letter-spacing: -0.035em;
   line-height: 1.05;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  white-space: nowrap;
 }
 
 .pronunciation-row {
@@ -1744,7 +1745,7 @@ select {
   flex-direction: column;
   max-height: 520px;
   overflow: hidden;
-  width: 320px;
+  width: 360px;
 }
 
 .translation-card-header {
