@@ -125,6 +125,25 @@ describe("SettingsWindow", () => {
     expect(screen.getByText("当前 2200ms")).toBeVisible();
   });
 
+  it("offers independent horizontal and vertical overlay offsets", () => {
+    render(<Harness />);
+    const horizontal = screen.getByRole("slider", {
+      name: "悬浮窗水平偏移",
+    });
+    const vertical = screen.getByRole("slider", { name: "悬浮窗垂直偏移" });
+    expect(horizontal).toHaveAttribute("max", "240");
+    expect(vertical).toHaveAttribute("max", "240");
+
+    fireEvent.change(horizontal, { target: { value: "120" } });
+    fireEvent.change(vertical, { target: { value: "80" } });
+
+    expect(screen.getByText("悬浮窗水平偏移 · 120px")).toBeVisible();
+    expect(screen.getByText("悬浮窗垂直偏移 · 80px")).toBeVisible();
+    const preview = screen.getByRole("button", { name: /A quiet place/ });
+    expect(preview.style.getPropertyValue("--preview-offset-x")).toBe("120px");
+    expect(preview.style.getPropertyValue("--preview-offset-y")).toBe("80px");
+  });
+
   it("lets the user choose an installed font", async () => {
     const user = userEvent.setup();
     render(<Harness />);

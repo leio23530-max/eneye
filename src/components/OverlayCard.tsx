@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon } from "./Icon";
 import { IconButton } from "./IconButton";
@@ -193,7 +194,9 @@ export function OverlayCard({
     if ((event.target as HTMLElement).closest("button,a,input,textarea")) {
       return;
     }
-    void getCurrentWindow().startDragging();
+    void invoke("begin_overlay_drag")
+      .then(() => getCurrentWindow().startDragging())
+      .finally(() => invoke("end_overlay_drag"));
   }
 
   const cardStyle = {

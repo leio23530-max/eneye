@@ -195,6 +195,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
         let mut resolved_for_dwell = false;
         let mut leave_since: Option<Instant> = None;
         let mut applied_offset = overlay_offset(&app);
+        let mut applied_ignore_cursor: Option<bool> = None;
         let (ocr_sender, ocr_receiver) = mpsc::channel::<OcrCompletion>();
         let mut ocr_generation = 0_u64;
 
@@ -254,7 +255,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                         overlay_mode(&app),
                         overlay_pinned(&app),
                         overlay_is_visible(&app),
-                        point_inside_overlay(&app, pointer),
+                        point_inside_card(&app, pointer),
                         point_inside_own_process(pointer),
                         pointer,
                         overlay_anchor(&app),
@@ -272,8 +273,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     pointer = (x, y);
                     stability_anchor = pointer;
                     down_at = Some((x, y));
-                    down_on_overlay =
-                        overlay_is_visible(&app) && point_inside_overlay(&app, (x, y));
+                    down_on_overlay = overlay_is_visible(&app) && point_inside_card(&app, (x, y));
                     leave_since = None;
                     stable_since = Instant::now();
                     preflight = None;
@@ -294,7 +294,7 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                         })
                         .unwrap_or(false);
                     let end_on_overlay =
-                        overlay_is_visible(&app) && point_inside_overlay(&app, (x, y));
+                        overlay_is_visible(&app) && point_inside_card(&app, (x, y));
                     let start = drag_origin.unwrap_or((x, y));
                     let selection_blocked = selection_should_be_ignored(
                         down_on_overlay,
@@ -331,12 +331,19 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                     since.elapsed(),
                     word_linger(&app),
                     overlay_pinned(&app),
-                    point_inside_overlay(&app, pointer),
+                    point_inside_card(&app, pointer),
                 )
             {
                 hide_overlay(&app);
                 leave_since = None;
             }
+
+            sync_overlay_cursor_passthrough(
+                &app,
+                pointer,
+                down_at.is_some(),
+                &mut applied_ignore_cursor,
+            );
 
             if down_at.is_some()
                 || point_inside_own_process(pointer)
@@ -661,13 +668,21 @@ fn lookup(app: &tauri::AppHandle, word: &str, source: &str) -> Option<crate::mod
     Some(result)
 }
 
-fn overlay_offset(app: &tauri::AppHandle) -> i32 {
+fn anchor_from_card_top_left(bounds: OverlayBounds, offset: (i32, i32)) -> (i32, i32) {
+    (bounds.x - offset.0, bounds.y - offset.1)
+}
+
+fn overlay_offset(app: &tauri::AppHandle) -> (i32, i32) {
     app.state::<AppState>()
         .settings
         .lock()
-        .map(|settings| settings.overlay_offset_px as i32)
-        .unwrap_or(20)
-        .clamp(0, 64)
+        .map(|settings| {
+            (
+                settings.overlay_offset_x_px as i32,
+                settings.overlay_offset_y_px as i32,
+            )
+        })
+        .unwrap_or((20, 20))
 }
 
 fn lookup_delay(app: &tauri::AppHandle) -> u64 {
@@ -720,6 +735,9 @@ fn overlay_pinned(app: &tauri::AppHandle) -> bool {
 }
 
 fn show_lookup(app: &tauri::AppHandle, lookup: crate::models::LookupResult, point: (i32, i32)) {
+    app.state::<AppState>()
+        .overlay_drag_pending
+        .store(false, Ordering::Release);
     set_overlay_state(app, OverlayMode::Word, Some(point));
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.emit("eneye://lookup", lookup);
@@ -729,6 +747,9 @@ fn show_lookup(app: &tauri::AppHandle, lookup: crate::models::LookupResult, poin
 }
 
 fn show_selection(app: &tauri::AppHandle, payload: SelectionPayload, point: (i32, i32)) {
+    app.state::<AppState>()
+        .overlay_drag_pending
+        .store(false, Ordering::Release);
     set_overlay_state(app, OverlayMode::Translation, Some(point));
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.emit("eneye://selection", payload.clone());
@@ -769,6 +790,9 @@ fn hide_overlay(app: &tauri::AppHandle) {
         && can_hide
     {
         let _ = window.hide();
+        app.state::<AppState>()
+            .overlay_drag_pending
+            .store(false, Ordering::Release);
         set_overlay_state(app, OverlayMode::Hidden, None);
         app.state::<AppState>()
             .overlay_pinned
@@ -784,13 +808,60 @@ fn captures_escape(mode: OverlayMode) -> bool {
     mode == OverlayMode::Translation
 }
 
+const CARD_STAGE_PADDING: f64 = 8.0;
+const DEFAULT_CARD_WIDTH: f64 = 320.0;
+const DEFAULT_CARD_HEIGHT: f64 = 520.0;
+const CARD_GAP: i32 = 12;
+
+fn place_card(
+    point: (i32, i32),
+    card: (u32, u32),
+    offset: (i32, i32),
+    work_area: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let (left, top, right, bottom) = work_area;
+    let width = card.0 as i32;
+    let height = card.1 as i32;
+    let mut x = point.0 + offset.0;
+    let mut y = point.1 + offset.1;
+    if x + width + CARD_GAP > right {
+        x = point.0 - width - offset.0;
+    }
+    if y + height + CARD_GAP > bottom {
+        y = point.1 - height - offset.1;
+    }
+    let max_x = (right - width - CARD_GAP).max(left + CARD_GAP);
+    let max_y = (bottom - height - CARD_GAP).max(top + CARD_GAP);
+    (
+        x.clamp(left + CARD_GAP, max_x),
+        y.clamp(top + CARD_GAP, max_y),
+    )
+}
+
 pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
-    const WIDTH: i32 = 440;
-    const HEIGHT: i32 = 610;
-    const GAP: i32 = 12;
     let Some(window) = app.get_webview_window("overlay") else {
         return;
     };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let stored = app
+        .state::<AppState>()
+        .overlay_card_bounds
+        .lock()
+        .ok()
+        .and_then(|bounds| *bounds);
+    let card = stored
+        .filter(|bounds| bounds.width > 0 && bounds.height > 0)
+        .map(|bounds| (bounds.width, bounds.height))
+        .unwrap_or_else(|| {
+            (
+                (DEFAULT_CARD_WIDTH * scale).round() as u32,
+                (DEFAULT_CARD_HEIGHT * scale).round() as u32,
+            )
+        });
+    let padding = (CARD_STAGE_PADDING * scale).round() as i32;
+    let window_size =
+        tauri::PhysicalSize::new(card.0 + padding as u32 * 2, card.1 + padding as u32 * 2);
+    let _ = window.set_size(window_size);
     let monitor = app.available_monitors().ok().and_then(|monitors| {
         monitors.into_iter().find(|monitor| {
             let position = monitor.position();
@@ -801,7 +872,7 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
                 && point.1 < position.y + size.height as i32
         })
     });
-    let (left, top, right, bottom) = monitor
+    let work_area = monitor
         .map(|monitor| {
             let area = monitor.work_area();
             let position = area.position;
@@ -814,24 +885,71 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
             )
         })
         .unwrap_or((0, 0, 1920, 1080));
-    let offset = overlay_offset(app);
-    let mut x = point.0 + offset;
-    let mut y = point.1 + offset;
-    if x + WIDTH + GAP > right {
-        x = point.0 - WIDTH - offset;
+    let (card_x, card_y) = place_card(point, card, overlay_offset(app), work_area);
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        card_x - padding,
+        card_y - padding,
+    ));
+}
+
+pub(crate) fn update_card_bounds(app: &tauri::AppHandle, bounds: Option<OverlayBounds>) {
+    let state = app.state::<AppState>();
+    let dragging = state.overlay_drag_pending.load(Ordering::Acquire);
+    if dragging && let Some(bounds) = bounds {
+        let anchor = anchor_from_card_top_left(bounds, overlay_offset(app));
+        if let Ok(mut current) = state.overlay_anchor.lock() {
+            *current = Some(anchor);
+        }
     }
-    if y + HEIGHT + GAP > bottom {
-        y = point.1 - HEIGHT - offset;
+    let previous = state
+        .overlay_card_bounds
+        .lock()
+        .ok()
+        .and_then(|current| *current);
+    if let Ok(mut current) = state.overlay_card_bounds.lock() {
+        *current = bounds;
     }
-    x = x.clamp(left + GAP, (right - WIDTH - GAP).max(left + GAP));
-    y = y.clamp(top + GAP, (bottom - HEIGHT - GAP).max(top + GAP));
-    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let size_changed = match (previous, bounds) {
+        (Some(previous), Some(bounds)) => {
+            previous.width != bounds.width || previous.height != bounds.height
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if size_changed
+        && !dragging
+        && overlay_is_visible(app)
+        && !overlay_pinned(app)
+        && let Some(anchor) = overlay_anchor(app)
+    {
+        position_overlay(app, anchor);
+    }
 }
 
 fn overlay_is_visible(app: &tauri::AppHandle) -> bool {
     app.get_webview_window("overlay")
         .and_then(|window| window.is_visible().ok())
         .unwrap_or(false)
+}
+
+fn sync_overlay_cursor_passthrough(
+    app: &tauri::AppHandle,
+    point: (i32, i32),
+    pointer_down: bool,
+    applied: &mut Option<bool>,
+) {
+    if pointer_down {
+        return;
+    }
+    let ignore = !overlay_is_visible(app) || !point_inside_card(app, point);
+    if *applied == Some(ignore) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("overlay")
+        && window.set_ignore_cursor_events(ignore).is_ok()
+    {
+        *applied = Some(ignore);
+    }
 }
 
 fn point_inside_card(app: &tauri::AppHandle, point: (i32, i32)) -> bool {
@@ -913,9 +1031,7 @@ fn handle_selection(
     if point_inside_own_process(start) || point_inside_own_process(end) {
         return;
     }
-    if overlay_is_visible(app)
-        && (point_inside_overlay(app, start) || point_inside_overlay(app, end))
-    {
+    if overlay_is_visible(app) && (point_inside_card(app, start) || point_inside_card(app, end)) {
         return;
     }
     if let Some(text) = uia_selection(automation, start) {
@@ -1978,14 +2094,83 @@ mod tests {
     }
 
     #[test]
+    fn places_the_card_at_the_requested_dual_axis_offset() {
+        let work = (0, 0, 1920, 1080);
+        assert_eq!(
+            place_card((1000, 300), (320, 400), (20, 20), work),
+            (1020, 320)
+        );
+        assert_eq!(
+            place_card((800, 300), (320, 400), (240, 240), work),
+            (1040, 540)
+        );
+    }
+
+    #[test]
+    fn flips_and_clamps_the_card_at_screen_edges() {
+        let work = (0, 0, 1920, 1080);
+        assert_eq!(
+            place_card((1800, 300), (320, 400), (20, 20), work),
+            (1460, 320)
+        );
+        assert_eq!(
+            place_card((800, 900), (320, 400), (20, 20), work),
+            (820, 480)
+        );
+        assert_eq!(place_card((5, 5), (320, 400), (20, 20), work), (25, 25));
+    }
+
+    #[test]
     fn overlay_rectangle_owns_the_pointer() {
         let position = (100, 100);
-        let size = (440, 610);
+        let size = (336, 536);
         assert!(point_in_window_bounds(position, size, (100, 100)));
-        assert!(point_in_window_bounds(position, size, (539, 709)));
+        assert!(point_in_window_bounds(position, size, (435, 635)));
         assert!(!point_in_window_bounds(position, size, (99, 100)));
-        assert!(!point_in_window_bounds(position, size, (540, 100)));
-        assert!(!point_in_window_bounds(position, size, (100, 710)));
+        assert!(!point_in_window_bounds(position, size, (436, 100)));
+        assert!(!point_in_window_bounds(position, size, (100, 636)));
+    }
+
+    #[test]
+    fn transparent_stage_gutter_is_not_part_of_the_card() {
+        let card = (100, 100);
+        let size = (320, 520);
+        assert!(point_in_window_bounds(card, size, (419, 619)));
+        assert!(!point_in_window_bounds(card, size, (420, 619)));
+        assert!(!point_in_window_bounds(card, size, (419, 620)));
+    }
+
+    #[test]
+    fn a_dragged_card_becomes_the_new_anchor() {
+        let bounds = OverlayBounds {
+            x: 500,
+            y: 300,
+            width: 320,
+            height: 520,
+        };
+        assert_eq!(anchor_from_card_top_left(bounds, (20, 20)), (480, 280));
+        assert_eq!(
+            place_card(
+                anchor_from_card_top_left(bounds, (20, 20)),
+                (bounds.width, bounds.height),
+                (20, 20),
+                (0, 0, 1920, 1080)
+            ),
+            (500, 300)
+        );
+    }
+
+    #[test]
+    fn places_the_card_on_a_negative_coordinate_monitor() {
+        let work = (-1920, 0, -100, 1040);
+        assert_eq!(
+            place_card((-1500, 200), (320, 400), (20, 20), work),
+            (-1480, 220)
+        );
+        assert_eq!(
+            place_card((-350, 200), (320, 400), (20, 20), work),
+            (-690, 220)
+        );
     }
 
     #[test]

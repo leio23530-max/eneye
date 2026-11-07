@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 pub struct AppSettings {
     pub lookup_delay_ms: u64,
     pub word_card_linger_ms: u64,
-    pub overlay_offset_px: u64,
+    #[serde(alias = "overlayOffsetPx")]
+    pub overlay_offset_x_px: u64,
+    pub overlay_offset_y_px: u64,
     pub ai_translation_enabled: bool,
     pub auto_translate: bool,
     pub launch_at_startup: bool,
@@ -58,7 +60,8 @@ impl Default for AppSettings {
         Self {
             lookup_delay_ms: 240,
             word_card_linger_ms: 1500,
-            overlay_offset_px: 20,
+            overlay_offset_x_px: 20,
+            overlay_offset_y_px: 20,
             ai_translation_enabled: true,
             auto_translate: true,
             launch_at_startup: false,
@@ -80,7 +83,8 @@ impl AppSettings {
     pub fn validate(&mut self) -> Result<()> {
         self.lookup_delay_ms = self.lookup_delay_ms.clamp(100, 500);
         self.word_card_linger_ms = self.word_card_linger_ms.clamp(0, 5000);
-        self.overlay_offset_px = self.overlay_offset_px.clamp(0, 64);
+        self.overlay_offset_x_px = self.overlay_offset_x_px.clamp(0, 240);
+        self.overlay_offset_y_px = self.overlay_offset_y_px.clamp(0, 240);
         self.headword_font =
             sanitize_font_name(&self.headword_font).unwrap_or_else(|| "Georgia".into());
         self.body_font = sanitize_font_name(&self.body_font).unwrap_or_else(|| "Segoe UI".into());
@@ -250,7 +254,8 @@ mod tests {
         settings.validate().unwrap();
         assert_eq!(settings.lookup_delay_ms, 240);
         assert_eq!(settings.word_card_linger_ms, 1500);
-        assert_eq!(settings.overlay_offset_px, 20);
+        assert_eq!(settings.overlay_offset_x_px, 20);
+        assert_eq!(settings.overlay_offset_y_px, 20);
         assert!(settings.ai_translation_enabled);
         assert_eq!(settings.target_language, "简体中文");
         assert_eq!(settings.ai_base_url, "https://api.deepseek.com");
@@ -259,6 +264,13 @@ mod tests {
         assert_eq!(settings.ai_roles.translation.effort, "medium");
         assert_eq!(settings.translation_effort(), "high");
         assert!(settings.auto_translate);
+    }
+
+    #[test]
+    fn migrates_the_legacy_single_offset_to_the_horizontal_axis() {
+        let settings: AppSettings = serde_json::from_str(r#"{"overlayOffsetPx": 0}"#).unwrap();
+        assert_eq!(settings.overlay_offset_x_px, 0);
+        assert_eq!(settings.overlay_offset_y_px, 20);
     }
 
     #[test]
@@ -287,14 +299,16 @@ mod tests {
         let mut settings = AppSettings {
             lookup_delay_ms: 20,
             word_card_linger_ms: 0,
-            overlay_offset_px: 999,
+            overlay_offset_x_px: 999,
+            overlay_offset_y_px: 999,
             body_font: "Segoe UI; background:red".into(),
             ..AppSettings::default()
         };
         settings.validate().unwrap();
         assert_eq!(settings.lookup_delay_ms, 100);
         assert_eq!(settings.word_card_linger_ms, 0);
-        assert_eq!(settings.overlay_offset_px, 64);
+        assert_eq!(settings.overlay_offset_x_px, 240);
+        assert_eq!(settings.overlay_offset_y_px, 240);
         assert_eq!(settings.body_font, "Segoe UI");
     }
 

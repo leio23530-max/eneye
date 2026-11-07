@@ -44,6 +44,7 @@ struct AppState {
     overlay_mode: Mutex<capture::OverlayMode>,
     overlay_anchor: Mutex<Option<(i32, i32)>>,
     overlay_card_bounds: Mutex<Option<capture::OverlayBounds>>,
+    overlay_drag_pending: AtomicBool,
 }
 
 impl AppState {
@@ -73,6 +74,7 @@ impl AppState {
             overlay_mode: Mutex::new(capture::OverlayMode::Hidden),
             overlay_anchor: Mutex::new(None),
             overlay_card_bounds: Mutex::new(None),
+            overlay_drag_pending: AtomicBool::new(false),
         })
     }
 }
@@ -626,10 +628,22 @@ fn set_overlay_pinned(pinned: bool, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn set_overlay_card_bounds(bounds: Option<capture::OverlayBounds>, state: State<'_, AppState>) {
-    if let Ok(mut current) = state.overlay_card_bounds.lock() {
-        *current = bounds;
-    }
+fn set_overlay_card_bounds(app: tauri::AppHandle, bounds: Option<capture::OverlayBounds>) {
+    capture::update_card_bounds(&app, bounds);
+}
+
+#[tauri::command]
+fn begin_overlay_drag(state: State<'_, AppState>) {
+    state
+        .overlay_drag_pending
+        .store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[tauri::command]
+fn end_overlay_drag(state: State<'_, AppState>) {
+    state
+        .overlay_drag_pending
+        .store(false, std::sync::atomic::Ordering::Release);
 }
 
 #[tauri::command]
@@ -638,6 +652,9 @@ fn hide_overlay(app: tauri::AppHandle, state: State<'_, AppState>) {
         let _ = window.hide();
     }
     capture::mark_overlay_hidden();
+    state
+        .overlay_drag_pending
+        .store(false, std::sync::atomic::Ordering::Release);
     if let Ok(mut mode) = state.overlay_mode.lock() {
         *mode = capture::OverlayMode::Hidden;
     }
@@ -661,7 +678,7 @@ fn show_settings(app: tauri::AppHandle) {
 fn create_overlay(app: &tauri::App) -> tauri::Result<()> {
     WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
         .title("Eneye")
-        .inner_size(440.0, 610.0)
+        .inner_size(336.0, 536.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -845,6 +862,8 @@ pub fn run() {
             cancel_translation,
             set_overlay_pinned,
             set_overlay_card_bounds,
+            begin_overlay_drag,
+            end_overlay_drag,
             hide_overlay,
             show_settings
         ])

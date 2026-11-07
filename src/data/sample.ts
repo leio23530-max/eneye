@@ -8,7 +8,8 @@ import type {
 export const DEFAULT_SETTINGS: AppSettings = {
   lookupDelayMs: 240,
   wordCardLingerMs: 1500,
-  overlayOffsetPx: 20,
+  overlayOffsetXPx: 20,
+  overlayOffsetYPx: 20,
   aiTranslationEnabled: true,
   autoTranslate: true,
   launchAtStartup: false,

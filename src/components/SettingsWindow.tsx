@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { FONT_OPTIONS } from "../data/sample";
@@ -738,21 +744,39 @@ export function SettingsWindow({
                 </span>
               </label>
               <label className="range-field range-field-secondary">
-                <span>悬浮窗距鼠标 · {settings.overlayOffsetPx}px</span>
+                <span>悬浮窗水平偏移 · {settings.overlayOffsetXPx}px</span>
                 <input
-                  aria-label="悬浮窗距鼠标"
-                  max="64"
+                  aria-label="悬浮窗水平偏移"
+                  max="240"
                   min="0"
                   onChange={(event) =>
-                    update("overlayOffsetPx", Number(event.target.value))
+                    update("overlayOffsetXPx", Number(event.target.value))
                   }
                   step="2"
                   type="range"
-                  value={settings.overlayOffsetPx}
+                  value={settings.overlayOffsetXPx}
                 />
                 <span className="range-labels">
                   <span>贴近 0px</span>
-                  <span>远离 64px</span>
+                  <span>远离 240px</span>
+                </span>
+              </label>
+              <label className="range-field range-field-secondary">
+                <span>悬浮窗垂直偏移 · {settings.overlayOffsetYPx}px</span>
+                <input
+                  aria-label="悬浮窗垂直偏移"
+                  max="240"
+                  min="0"
+                  onChange={(event) =>
+                    update("overlayOffsetYPx", Number(event.target.value))
+                  }
+                  step="2"
+                  type="range"
+                  value={settings.overlayOffsetYPx}
+                />
+                <span className="range-labels">
+                  <span>贴近 0px</span>
+                  <span>远离 240px</span>
                 </span>
               </label>
               <button
@@ -760,6 +784,12 @@ export function SettingsWindow({
                 onClick={showSamplePreviewNow}
                 onMouseEnter={showSamplePreview}
                 onMouseLeave={hideSamplePreview}
+                style={
+                  {
+                    "--preview-offset-x": `${settings.overlayOffsetXPx}px`,
+                    "--preview-offset-y": `${settings.overlayOffsetYPx}px`,
+                  } as CSSProperties
+                }
                 type="button"
               >
                 <span className="preview-line">
