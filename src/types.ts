@@ -20,19 +20,24 @@ export interface LookupResult {
   entries: DictionaryEntry[];
 }
 
+export type TranslationKind = "translate" | "explain";
+
 export interface TranslationRequest {
   requestId: string;
   text: string;
   sourceLanguage: string;
   targetLanguage: string;
   source: RecognitionSource;
+  kind: TranslationKind;
 }
 
-export type TranslationStatus = "idle" | "streaming" | "complete" | "error";
+export type TranslationStatus =
+  "idle" | "streaming" | "complete" | "cancelled" | "error";
 
 export interface TranslationState {
   requestId: string;
   text: string;
+  kind: TranslationKind;
   status: TranslationStatus;
   output: string;
   error?: string;

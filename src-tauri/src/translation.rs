@@ -13,6 +13,14 @@ const KEYRING_SERVICE: &str = "app.eneye.desktop.ai";
 const KEYRING_USER: &str = "default";
 const MAX_SELECTION_CHARS: usize = 2_000;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TranslationKind {
+    #[default]
+    Translate,
+    Explain,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationRequest {
@@ -22,6 +30,8 @@ pub struct TranslationRequest {
     pub target_language: String,
     #[serde(default = "default_source")]
     pub source: String,
+    #[serde(default)]
+    pub kind: TranslationKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,41 +240,11 @@ where
         .build()?;
     let protocol = AiProtocol::for_settings(settings);
     let endpoint = translation_endpoint(&settings.ai_base_url, protocol)?;
-    let source_language = if request.source_language.trim().is_empty() {
-        "auto"
-    } else {
-        request.source_language.trim()
-    };
-    let target_language = if request.target_language.trim().is_empty() {
-        "简体中文"
-    } else {
-        request.target_language.trim()
-    };
-    let instruction = format!(
-        "You are a translation engine. Translate the user's text from {source_language} to {target_language}. Return only the translation, preserve paragraph breaks, and do not add explanations."
-    );
     let model = settings.translation_model();
-    let mut body = match protocol {
-        AiProtocol::OpenAi => json!({
-            "model": model,
-            "stream": true,
-            "temperature": 0.2,
-            "messages": [
-                { "role": "system", "content": instruction },
-                { "role": "user", "content": request.text }
-            ]
-        }),
-        AiProtocol::Anthropic => json!({
-            "model": model,
-            "stream": true,
-            "max_tokens": 2048,
-            "temperature": 0.2,
-            "system": instruction,
-            "messages": [
-                { "role": "user", "content": request.text }
-            ]
-        }),
-    };
+    if model.trim().is_empty() {
+        anyhow::bail!("尚未选择翻译模型；请先在“设置 → AI 翻译”中选择模型");
+    }
+    let mut body = request_body(settings, request, protocol);
     if protocol == AiProtocol::OpenAi && settings.supports_reasoning_effort(model) {
         body.as_object_mut().map(|object| {
             object.insert(
@@ -282,7 +262,7 @@ where
         }
         response = authorized_request(client.post(&endpoint), protocol, api_key)
             .json(&body)
-            .send() => response.context("无法连接 AI 服务")?
+            .send() => response.map_err(|error| anyhow::anyhow!("{}", transport_error(&error)))?
     };
 
     if response.status() == reqwest::StatusCode::BAD_REQUEST {
@@ -302,7 +282,7 @@ where
                 }
                 response = authorized_request(client.post(&endpoint), protocol, api_key)
                     .json(&body)
-                    .send() => response.context("无法连接 AI 服务")?
+                    .send() => response.map_err(|error| anyhow::anyhow!("{}", transport_error(&error)))?
             };
         } else {
             anyhow::bail!(
@@ -324,6 +304,24 @@ where
             status.as_u16(),
             response_error_hint(status.as_u16(), &safe_body)
         );
+    }
+
+    let status = response.status();
+    if status == reqwest::StatusCode::ACCEPTED || status == reqwest::StatusCode::NO_CONTENT {
+        anyhow::bail!(
+            "AI 服务返回 HTTP {} 但没有返回内容；请确认模型支持流式输出并稍后重试",
+            status.as_u16()
+        );
+    }
+    let is_event_stream = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+    if !is_event_stream {
+        let body = response.text().await.unwrap_or_default();
+        let safe_body = redact_secret(&body, api_key);
+        return finish_non_stream_body(request, status, &safe_body, emit);
     }
 
     let mut stream = response.bytes_stream();
@@ -370,6 +368,155 @@ where
         text: output,
         unsupported_reasoning_model,
     })
+}
+
+fn finish_non_stream_body<F>(
+    request: &TranslationRequest,
+    status: reqwest::StatusCode,
+    body: &str,
+    mut emit: F,
+) -> Result<TranslationOutcome>
+where
+    F: FnMut(TranslationEvent),
+{
+    let mut output = String::new();
+    if body.trim_start().starts_with("data:") {
+        let mut parser = StreamParser::default();
+        for parsed in parser.push(body)? {
+            if let Some(delta) = parsed.text {
+                output.push_str(&delta);
+            }
+        }
+        if !parser.finished() {
+            anyhow::bail!(
+                "AI 服务返回了不完整的流式响应（HTTP {}），请重试",
+                status.as_u16()
+            );
+        }
+    } else {
+        let value: serde_json::Value = serde_json::from_str(body)
+            .context("AI 服务返回了无法解析的响应；请确认 Base URL 指向兼容接口")?;
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("AI 服务返回错误：{error}");
+        }
+        output = completion_text(&value).unwrap_or_default();
+    }
+    let output = output.trim().to_owned();
+    if output.is_empty() {
+        anyhow::bail!(
+            "AI 服务返回了空内容（HTTP {}）；请检查模型是否可用",
+            status.as_u16()
+        );
+    }
+    emit(TranslationEvent::Delta {
+        request_id: request.request_id.clone(),
+        text: output.clone(),
+    });
+    emit(TranslationEvent::Completed {
+        request_id: request.request_id.clone(),
+        text: output.clone(),
+    });
+    Ok(TranslationOutcome {
+        text: output,
+        unsupported_reasoning_model: None,
+    })
+}
+
+fn transport_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        "AI 服务响应超时（30 秒），请稍后重试".to_owned()
+    } else if error.is_connect() {
+        "无法连接 AI 服务，请检查网络与 Base URL".to_owned()
+    } else {
+        format!("AI 请求失败：{error}")
+    }
+}
+
+fn instruction_for(request: &TranslationRequest) -> String {
+    let source_language = if request.source_language.trim().is_empty() {
+        "auto"
+    } else {
+        request.source_language.trim()
+    };
+    let target_language = if request.target_language.trim().is_empty() {
+        "简体中文"
+    } else {
+        request.target_language.trim()
+    };
+    match request.kind {
+        TranslationKind::Translate => format!(
+            "You are a translation engine. Translate the user's text from {source_language} to {target_language}. Return only the translation, preserve paragraph breaks, and do not add explanations."
+        ),
+        TranslationKind::Explain => format!(
+            "You are a bilingual dictionary editor. Explain the user's English word or phrase in {target_language} for a reader who just met it while reading. Give the part of speech, the core meaning, and one short example. Do not answer with a bare translation and do not invent a context that is not implied by the word. Keep the answer under 160 characters."
+        ),
+    }
+}
+
+fn request_body(
+    settings: &AppSettings,
+    request: &TranslationRequest,
+    protocol: AiProtocol,
+) -> serde_json::Value {
+    let instruction = instruction_for(request);
+    let model = settings.translation_model();
+    match protocol {
+        AiProtocol::OpenAi => json!({
+            "model": model,
+            "stream": true,
+            "temperature": 0.2,
+            "messages": [
+                { "role": "system", "content": instruction },
+                { "role": "user", "content": request.text }
+            ]
+        }),
+        AiProtocol::Anthropic => json!({
+            "model": model,
+            "stream": true,
+            "max_tokens": 2048,
+            "temperature": 0.2,
+            "system": instruction,
+            "messages": [
+                { "role": "user", "content": request.text }
+            ]
+        }),
+    }
+}
+
+fn completion_text(value: &serde_json::Value) -> Option<String> {
+    let direct = value
+        .pointer("/choices/0/message/content")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/choices/0/text")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .pointer("/output_text")
+                .and_then(serde_json::Value::as_str)
+        });
+    if let Some(text) = direct {
+        return Some(text.to_owned());
+    }
+    for pointer in ["/choices/0/message/content", "/content"] {
+        if let Some(parts) = value.pointer(pointer).and_then(serde_json::Value::as_array) {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| part.as_str())
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }
 
 fn validate_request(request: &TranslationRequest) -> Result<()> {
@@ -470,7 +617,9 @@ fn response_error_hint(status: u16, body: &str) -> String {
     match status {
         401 | 403 => "API Key 无效或没有模型权限".into(),
         404 => "接口或模型不存在，请检查 Base URL 与模型名称".into(),
+        408 | 504 => "AI 服务响应超时，请稍后重试".into(),
         429 => "请求过于频繁或额度不足，请稍后重试".into(),
+        300..=399 => "AI 服务返回重定向，请检查 Base URL 是否指向接口地址".into(),
         500..=599 => "服务暂时不可用，请稍后重试".into(),
         _ if !body.trim().is_empty() => body.trim().to_owned(),
         _ => "请求失败".into(),
@@ -613,6 +762,7 @@ mod tests {
             source_language: "auto".into(),
             target_language: "简体中文".into(),
             source: "uia".into(),
+            kind: TranslationKind::Translate,
         };
         let mut events = Vec::new();
         let result = stream_translation(
@@ -691,6 +841,7 @@ mod tests {
             source_language: "auto".into(),
             target_language: "简体中文".into(),
             source: "uia".into(),
+            kind: TranslationKind::Translate,
         };
         let outcome = stream_translation(
             &settings,
@@ -750,6 +901,7 @@ mod tests {
             source_language: "auto".into(),
             target_language: "简体中文".into(),
             source: "uia".into(),
+            kind: TranslationKind::Translate,
         };
         let outcome = stream_translation(
             &settings,
@@ -798,6 +950,7 @@ mod tests {
             source_language: "auto".into(),
             target_language: "简体中文".into(),
             source: "uia".into(),
+            kind: TranslationKind::Translate,
         };
         let error = stream_translation(
             &settings,
@@ -847,6 +1000,7 @@ mod tests {
             source_language: "auto".into(),
             target_language: "简体中文".into(),
             source: "uia".into(),
+            kind: TranslationKind::Translate,
         };
         let error = stream_translation(
             &settings,
@@ -875,6 +1029,7 @@ mod tests {
             source_language: "auto".into(),
             target_language: "简体中文".into(),
             source: "uia".into(),
+            kind: TranslationKind::Translate,
         };
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -925,5 +1080,188 @@ mod tests {
             .to_string();
         server.await.unwrap();
         assert!(error.contains("读取模型失败：401"));
+    }
+
+    #[test]
+    fn parses_non_stream_completion_shapes() {
+        let openai = serde_json::json!({
+            "choices": [{ "message": { "content": "非流式译文" } }]
+        });
+        assert_eq!(completion_text(&openai).as_deref(), Some("非流式译文"));
+        let anthropic = serde_json::json!({
+            "content": [{ "type": "text", "text": "第一段" }, { "type": "text", "text": "第二段" }]
+        });
+        assert_eq!(completion_text(&anthropic).as_deref(), Some("第一段第二段"));
+        assert_eq!(completion_text(&serde_json::json!({ "content": [] })), None);
+    }
+
+    #[test]
+    fn explains_with_a_dictionary_prompt_instead_of_a_translation_prompt() {
+        let settings = AppSettings {
+            ai_model: "mock-model".into(),
+            ..AppSettings::default()
+        };
+        let translate = TranslationRequest {
+            request_id: "t".into(),
+            text: "pollution".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+            kind: TranslationKind::Translate,
+        };
+        let explain = TranslationRequest {
+            kind: TranslationKind::Explain,
+            ..translate.clone()
+        };
+
+        let translate_body = request_body(&settings, &translate, AiProtocol::OpenAi);
+        let explain_body = request_body(&settings, &explain, AiProtocol::OpenAi);
+        let translate_prompt = translate_body["messages"][0]["content"].as_str().unwrap();
+        let explain_prompt = explain_body["messages"][0]["content"].as_str().unwrap();
+
+        assert!(translate_prompt.contains("translation engine"));
+        assert!(!translate_prompt.contains("dictionary editor"));
+        assert!(explain_prompt.contains("dictionary editor"));
+        assert!(!explain_prompt.contains("translation engine"));
+    }
+
+    #[tokio::test]
+    async fn accepts_a_json_completion_from_a_non_streaming_server() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = r#"{"choices":[{"message":{"content":"一次返回的完整译文"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        let settings = AppSettings {
+            ai_base_url: format!("http://{address}/v1"),
+            ai_model: "mock-model".into(),
+            ..AppSettings::default()
+        };
+        let request = TranslationRequest {
+            request_id: "non-stream".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+            kind: TranslationKind::Translate,
+        };
+        let mut events = Vec::new();
+        let outcome = stream_translation(
+            &settings,
+            "test-key",
+            &request,
+            CancellationToken::new(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+        let request = server.await.unwrap();
+
+        assert_eq!(outcome.text, "一次返回的完整译文");
+        assert!(request.contains("stream"));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TranslationEvent::Completed { text, .. } if text == "一次返回的完整译文"
+        )));
+    }
+
+    #[tokio::test]
+    async fn reports_accepted_and_no_content_statuses_instead_of_a_silent_hang() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        for status in ["202 Accepted", "204 No Content"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 8192];
+                let _ = socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let settings = AppSettings {
+                ai_base_url: format!("http://{address}/v1"),
+                ai_model: "mock-model".into(),
+                ..AppSettings::default()
+            };
+            let request = TranslationRequest {
+                request_id: "empty".into(),
+                text: "Hello".into(),
+                source_language: "auto".into(),
+                target_language: "简体中文".into(),
+                source: "uia".into(),
+                kind: TranslationKind::Translate,
+            };
+            let error = stream_translation(
+                &settings,
+                "test-key",
+                &request,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            server.await.unwrap();
+            assert!(error.contains("没有返回内容"), "{status}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn requires_a_translation_model_before_contacting_the_server() {
+        let mut settings = AppSettings {
+            ai_base_url: "http://127.0.0.1:9/v1".into(),
+            ..AppSettings::default()
+        };
+        settings.ai_model.clear();
+        settings.ai_roles.translation.model.clear();
+        let request = TranslationRequest {
+            request_id: "no-model".into(),
+            text: "Hello".into(),
+            source_language: "auto".into(),
+            target_language: "简体中文".into(),
+            source: "uia".into(),
+            kind: TranslationKind::Translate,
+        };
+        let error = stream_translation(
+            &settings,
+            "test-key",
+            &request,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("尚未选择翻译模型"), "{error}");
+    }
+
+    #[test]
+    fn maps_redirect_and_timeout_statuses_to_actionable_hints() {
+        assert!(response_error_hint(302, "").contains("重定向"));
+        assert!(response_error_hint(408, "").contains("超时"));
+        assert!(response_error_hint(504, "").contains("超时"));
     }
 }

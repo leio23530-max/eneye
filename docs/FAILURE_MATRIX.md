@@ -26,31 +26,31 @@
 
 | ID | 场景 | 期望 | 当前状态 | 证据 / 根因 | 目标 Phase |
 | --- | --- | --- | --- | --- | --- |
-| D-01 | CSV/TSV 导入 | 查询有结果、纯文本 fallback | partial | 有代码与部分测试，缺真实 fixture 端到端 | 2 |
-| D-02 | MDX/MDD 成套识别 | 自动关联 MDD | partial | 现有 MDX 可读；未验证同目录 MDD 关联 | 2 |
-| D-03 | StarDict 成套识别 | ifo/idx/dict/dz/syn | open | 需审计当前是否完整支持 | 2 |
+| D-01 | CSV/TSV 导入 | 查询有结果、纯文本 fallback | partial | 已有 CSV 导入/查询与空词典拒绝单测；设置窗真实导入仍待 Phase 5 复测 | 2 |
+| D-02 | MDX/MDD 成套识别 | 自动关联 MDD | partial | 改为精确 MDX 文件绑定；MDD 只接受同 stem 文件，缺真实 MDD fixture | 2 |
+| D-03 | StarDict 成套识别 | ifo/idx/dict/dz/syn | verified | 精确 stem、压缩件与同义词测试通过 | 2 |
 | D-04 | `@@@LINK` 可解析 | 显示目标词义 | verified | 已有 redirect 测试与 OALD 实测 | 2 回归 |
-| D-05 | `@@@LINK` 目标缺失 | 明确提示，不裸露控制串 | partial | 需补缺失目标测试 | 2 |
-| D-06 | 重复 redirect | 去重 | partial | 已有 dedupe 代码，需真实 OALD 回归 | 2 |
+| D-05 | `@@@LINK` 目标缺失 | 明确提示，不裸露控制串 | verified | 缺失目标、循环、过深均有单测与中文提示 | 2 |
+| D-06 | 重复 redirect | 去重 | partial | visited 去重与循环测试通过；真实 OALD 待 Phase 5 回归 | 2 |
 | D-07 | HTML senses 折叠 | 每义项独立折叠 | verified | OALD 实测 via OverlayCard | 2 回归 |
 | D-08 | 无法结构化 HTML | “完整释义”fallback | partial | 需补测试 | 2 |
-| D-09 | 文件移动 | 重新定位 | open | 当前只能删除/重导 | 2 |
-| D-10 | 导入成功但查询空白 | 明确原因 | open | 需统一导入状态与测试查询 | 2 |
+| D-09 | 文件移动 | 重新定位 | verified | 新增 relink/reload 命令、设置窗按钮与保留 id/priority 的测试 | 2 |
+| D-10 | 导入成功但查询空白 | 明确原因 | verified | 重复路径与零词条拒绝、错误上屏、relink 后清空 error | 2 |
 
 ## 3. AI
 
 | ID | 场景 | 期望 | 当前状态 | 证据 / 根因 | 目标 Phase |
 | --- | --- | --- | --- | --- | --- |
-| A-01 | 无 Key / 无模型 | UI 明确“未配置” | open | 默认 model 为空；诊断只看 Key | 3 |
+| A-01 | 无 Key / 无模型 | UI 明确“未配置” | verified | 设置页明确提示未选择翻译模型；命令返回可操作中文错误 | - |
 | A-02 | 测试连接 + 模型列表 | 明确成功/失败 | partial | 有 `list_ai_models`，无 UI E2E | 3 |
 | A-03 | `/models` 不可用 | 可手输模型 | partial | 后端允许，UI 需验收 | 3 |
-| A-04 | 拖选 → 流式翻译 | 逐字增长、完成 | open | 无 UI/mock E2E | 3 |
-| A-05 | 取消 | 正常终态，无错误/重试 | open | 前端把 cancelled 映射成 error | 3 |
-| A-06 | 旧请求覆盖新卡 | 丢弃旧事件 | partial | 前端按 requestId 过滤，缺测试 | 3 |
-| A-07 | 202/204/非流式 2xx | 明确文案 | open | 当前报“流意外中断” | 3 |
-| A-08 | 401/403/404/429/5xx | 明确文案 | partial | 有映射；缺 202/3xx/超时中文 | 3 |
+| A-04 | 拖选 → 流式翻译 | 逐字增长、完成 | partial | OpenAI 兼容 mock HTTP 流式 E2E；前端 reducer 测试；缺真实选择拖选自动化 | 3 |
+| A-05 | 取消 | 正常终态，无错误/重试 | verified | cancelled 中性终态、保留已生成内容、无 alert；reducer/UI 测试 | - |
+| A-06 | 旧请求覆盖新卡 | 丢弃旧事件 | verified | applyTranslationEvent 明确丢弃旧 requestId；单测覆盖 | - |
+| A-07 | 202/204/非流式 2xx | 明确文案 | verified | 202/204 明确提示；JSON completion 支持多种结构并有 mock 测试 | - |
+| A-08 | 401/403/404/429/5xx | 明确文案 | verified | 补充 3xx/408/504/超时/连接失败中文；映射测试 | - |
 | A-09 | 超时/断流/空响应 | 可恢复 | partial | 无 mock E2E；chunk 错误可能英文 | 3 |
-| A-10 | 翻译 vs 解释 | 不同 prompt/命令 | open | explain 复用 translateSelection | 3 |
+| A-10 | 翻译 vs 解释 | 不同 prompt/命令 | verified | TranslationKind 区分 prompt；解释不写历史；前端标题/动作独立 | - |
 | A-11 | Key 安全 | 只进 Credential Manager | verified | keyring + redact_secret 测试 | - |
 | A-12 | 历史记录 | 成功才写，取消/失败不写 | partial | 后端成功才写；缺 E2E | 3 |
 

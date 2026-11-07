@@ -1129,6 +1129,12 @@ export function SettingsWindow({
               <p className="agent-rule-note">
                 按官方模型规则发送。medium → high
               </p>
+              {!settings.aiRoles.translation.model.trim() &&
+                !settings.aiModel.trim() && (
+                  <span className="field-error" role="status">
+                    尚未选择“翻译”模型，翻译和解释都无法启动。
+                  </span>
+                )}
               {modelError && (
                 <span className="field-error" role="alert">
                   {modelError}

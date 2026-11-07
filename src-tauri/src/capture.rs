@@ -17,7 +17,10 @@ use crate::recognition::{
     self, GeneratedCandidate, OcrBox, OcrToken, RecognitionCandidate, WordEvidence,
 };
 use crate::word_probe::{self, WordProbeReport};
-use crate::{AppState, TranslationRequest, dictionary::clean_lookup_word, translate_selection};
+use crate::{
+    AppState, TranslationRequest, dictionary::clean_lookup_word, translate_selection,
+    translation::TranslationKind,
+};
 
 const STABLE_RADIUS: i32 = 5;
 const PREFLIGHT_MS: u64 = 100;
@@ -742,6 +745,7 @@ fn show_selection(app: &tauri::AppHandle, payload: SelectionPayload, point: (i32
             source_language: payload.source_language,
             target_language: payload.target_language,
             source: payload.source,
+            kind: TranslationKind::Translate,
         };
         let _ = translate_selection(app_handle.clone(), request, state).await;
     });

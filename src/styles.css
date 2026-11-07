@@ -1819,6 +1819,20 @@ select {
   margin-left: auto;
 }
 
+.translation-cancelled {
+  align-items: center;
+  color: var(--ink-faint);
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  line-height: 1.6;
+  margin: 10px 0 0;
+}
+
+.translation-cancelled .text-action {
+  margin-left: auto;
+}
+
 .translation-stop {
   align-items: center;
   align-self: flex-end;

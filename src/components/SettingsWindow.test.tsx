@@ -136,6 +136,16 @@ describe("SettingsWindow", () => {
     expect(select).toHaveValue("Arial");
   });
 
+  it("explains why translation cannot start without a model", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("button", { name: "AI 翻译" }));
+    expect(
+      screen.getByText("尚未选择“翻译”模型，翻译和解释都无法启动。"),
+    ).toBeVisible();
+  });
+
   it("switches between settings sections", async () => {
     const user = userEvent.setup();
     render(<Harness />);

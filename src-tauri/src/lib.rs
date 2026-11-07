@@ -28,7 +28,9 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
-use translation::{AiKeyStore, TranslationEvent, TranslationRequest, TranslationTasks};
+use translation::{
+    AiKeyStore, TranslationEvent, TranslationKind, TranslationRequest, TranslationTasks,
+};
 
 struct AppState {
     data_dir: PathBuf,
@@ -522,7 +524,7 @@ async fn translate_selection(
         return Err(message);
     }
     if settings.translation_model().is_empty() {
-        let message = "请先选择或填写 AI 模型名称".to_owned();
+        let message = "尚未选择翻译模型；请先在“设置 → AI 翻译”中选择模型".to_owned();
         let _ = app.emit(
             "eneye://translation",
             TranslationEvent::Failed {
@@ -582,12 +584,14 @@ async fn translate_selection(
                     }
                 }
             }
-            state
-                .storage
-                .lock()
-                .map_err(|_| "storage lock is poisoned".to_owned())?
-                .record_translation(&original_text, &outcome.text, &source)
-                .map_err(|error| error.to_string())?;
+            if request.kind == TranslationKind::Translate {
+                state
+                    .storage
+                    .lock()
+                    .map_err(|_| "storage lock is poisoned".to_owned())?
+                    .record_translation(&original_text, &outcome.text, &source)
+                    .map_err(|error| error.to_string())?;
+            }
             Ok(())
         }
         Err(error) => {

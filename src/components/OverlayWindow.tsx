@@ -8,6 +8,7 @@ import {
   translateSelection,
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/tauri";
+import { applyTranslationEvent } from "../lib/translation-state";
 import { SAMPLE_LOOKUP } from "../data/sample";
 import type {
   AppSettings,
@@ -46,43 +47,14 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
         setTranslation({
           requestId: event.payload.requestId,
           text: event.payload.text,
+          kind: "translate",
           status: "streaming",
           output: "",
         });
       }),
       onTranslationEvent((event) => {
         if (event.requestId !== currentRequest.current) return;
-        setTranslation((current) => {
-          if (!current) return current;
-          switch (event.type) {
-            case "delta":
-              return {
-                ...current,
-                status: "streaming",
-                output: current.output + event.text,
-              };
-            case "completed":
-              return {
-                ...current,
-                status: "complete",
-                output: event.text,
-              };
-            case "failed":
-              return {
-                ...current,
-                status: "error",
-                error: event.error,
-              };
-            case "cancelled":
-              return {
-                ...current,
-                status: "error",
-                error: "翻译已取消",
-              };
-            default:
-              return current;
-          }
-        });
+        setTranslation((current) => applyTranslationEvent(current, event));
       }),
     ]);
     return () => {
@@ -168,6 +140,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
     setTranslation({
       requestId,
       text: word,
+      kind: "explain",
       status: "streaming",
       output: "",
     });
@@ -177,6 +150,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
       sourceLanguage: settings.sourceLanguage,
       targetLanguage: settings.targetLanguage,
       source: "uia",
+      kind: "explain",
     }).catch((error) => {
       setTranslation((current) =>
         current
@@ -203,6 +177,7 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
       sourceLanguage: settings.sourceLanguage,
       targetLanguage: settings.targetLanguage,
       source: "uia",
+      kind: translation.kind,
     }).catch((error) => {
       setTranslation((current) =>
         current
@@ -257,18 +232,26 @@ export function TranslationOverlayCard({
   onCancel: () => void;
   onRetry: () => void;
 }) {
+  const explain = translation.kind === "explain";
+  const action = explain ? "解释" : "翻译";
+  const title =
+    translation.status === "streaming"
+      ? "正在" + action
+      : translation.status === "error"
+        ? action + "未完成"
+        : translation.status === "cancelled"
+          ? "已停止" + action
+          : explain
+            ? "解释"
+            : "译文";
   return (
     <article className="translation-card">
       <header className="translation-card-header">
         <div>
-          <p className="eyebrow">AI TRANSLATION</p>
-          <h2>
-            {translation.status === "streaming"
-              ? "正在翻译"
-              : translation.status === "error"
-                ? "翻译未完成"
-                : "译文"}
-          </h2>
+          <p className="eyebrow">
+            {explain ? "AI EXPLANATION" : "AI TRANSLATION"}
+          </p>
+          <h2>{title}</h2>
         </div>
         <div className="card-actions">
           <IconButton
@@ -291,18 +274,31 @@ export function TranslationOverlayCard({
             </button>
           </div>
         ) : (
-          <p className="translation-result">
-            {translation.output || "正在连接 AI 服务…"}
-            {translation.status === "streaming" && (
-              <span className="streaming-caret" aria-hidden="true" />
+          <>
+            <p className="translation-result">
+              {translation.output ||
+                (translation.status === "streaming"
+                  ? "正在连接 AI 服务…"
+                  : "已停止生成，没有收到内容。")}
+              {translation.status === "streaming" && (
+                <span className="streaming-caret" aria-hidden="true" />
+              )}
+            </p>
+            {translation.status === "cancelled" && (
+              <p className="translation-cancelled">
+                已停止，保留已经生成的内容。
+                <button className="text-action" onClick={onRetry} type="button">
+                  重新{action}
+                </button>
+              </p>
             )}
-          </p>
+          </>
         )}
       </div>
       {translation.status === "streaming" && (
         <button className="translation-stop" onClick={onCancel} type="button">
           <Icon name="pause" size={15} />
-          停止翻译
+          停止{action}
         </button>
       )}
     </article>

@@ -440,7 +440,9 @@ export function OverlayCard({
           >
             <div className="section-heading">
               <div>
-                <p className="eyebrow">AI 翻译</p>
+                <p className="eyebrow">
+                  {translation.kind === "explain" ? "AI 解释" : "AI 翻译"}
+                </p>
                 <p className="translation-source">{translation.text}</p>
               </div>
               {translation.status === "streaming" && (
@@ -472,6 +474,18 @@ export function OverlayCard({
                   重试
                 </button>
               </div>
+            )}
+            {translation.status === "cancelled" && (
+              <p className="translation-cancelled">
+                已停止，保留已经生成的内容。
+                <button
+                  className="text-action"
+                  onClick={onRetryTranslation}
+                  type="button"
+                >
+                  重试
+                </button>
+              </p>
             )}
           </section>
         )}

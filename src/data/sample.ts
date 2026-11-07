@@ -71,6 +71,7 @@ export const SAMPLE_LOOKUP: LookupResult = {
 export const SAMPLE_TRANSLATION: TranslationState = {
   requestId: "sample",
   text: "A quiet interface should disappear into the act of reading.",
+  kind: "translate",
   status: "complete",
   output: "安静的界面应当消融于阅读行为本身。",
 };
