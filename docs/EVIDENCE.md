@@ -38,6 +38,7 @@
 - 窗口：`Eneye final evidence surface`，hwnd 134336
 - 子控件：class `Edit`，hwnd 1248418，DPI 感知物理矩形 `128,151,1068,381`
 - 字体：Consolas 20
+- 夹具脚本：`F:\DSH\tmp\eneye-final-edit.ps1`
 - 文本：
 
 ```text
@@ -53,7 +54,7 @@ less linear circular identification nanogenerator
 | `on` | 475,201 | 卡片 headword `on`，OALD 介词义 | `F:\DSH\tmp\final-on.png` |
 | `war` | 415,201 | 卡片 headword `war`，OALD 名词义 | `F:\DSH\tmp\final-war.png` |
 | `being` | 220,169 | 卡片 headword `being`，OALD `be 原形` | `F:\DSH\tmp\final-being.png` |
-| `pollution` | 520,201 | 本次未出现卡片；重试时光标被外部自动化移走 | 旧构建证据 `F:\DSH\tmp\native-pollution.png` |
+| `pollution` | 520,201 | 最终构建多次重试未取得，原因见 3.2 | 旧构建证据 `F:\DSH\tmp\native-pollution.png` |
 
 对应的 overlay 窗口实测：
 
@@ -70,7 +71,7 @@ less linear circular identification nanogenerator
 
 ### 3.2 `pollution` 的说明
 
-旧构建 `2368E4F2…` 在同一夹具上取得过 `pollution` 卡片（`F:\DSH\tmp\native-pollution.png`），headword 一行、OALD 三个名词义。最终构建 `93B094F1…` 的两次 `pollution` 重试中，外部自动化分别把光标改到 `166,234` 和 `1324,638`，因此没有把失败归因于应用，也没有伪造通过结果。识别路径、词典路径和 UI 在两次构建之间没有变化；该样例仍需在无外部输入干扰的环境复测。
+旧构建 `2368E4F2…` 在同一夹具上取得过 `pollution` 卡片（`F:\DSH\tmp\native-pollution.png`），headword 一行、OALD 三个名词义。最终构建 `93B094F1…` 上共重试四次：两次在 `520,201` 等待 2.3–4.5 秒没有出现卡片；一次在 `530,201` 被外部自动化把光标改到 `1324,638`；一次带光标稳定采样的重试在采样结束时光标已变为 `519,202`，overlay 仍不可见。因此没有把失败归因于应用，也没有伪造通过结果。识别路径、词典路径和 UI 在两次构建之间没有变化；该样例仍需在无外部输入干扰的环境复测。
 
 ### 3.3 单实例
 
