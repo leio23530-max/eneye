@@ -333,10 +333,9 @@ struct RecognitionCorrectionRecord {
     candidates: Vec<recognition::RecognitionCandidate>,
 }
 
-#[tauri::command]
-fn record_recognition_correction(
-    correction: RecognitionCorrection,
-    state: State<'_, AppState>,
+fn append_recognition_correction(
+    data_dir: &std::path::Path,
+    correction: &RecognitionCorrection,
 ) -> Result<(), String> {
     let observed = correction.observed.trim();
     let corrected = correction.corrected.trim();
@@ -351,13 +350,13 @@ fn record_recognition_correction(
         at,
         observed: observed.chars().take(80).collect(),
         corrected: corrected.to_owned(),
-        source: correction.source,
+        source: correction.source.clone(),
         confidence: correction.confidence,
-        reason: correction.reason,
-        candidates: correction.candidates.into_iter().take(20).collect(),
+        reason: correction.reason.clone(),
+        candidates: correction.candidates.iter().take(20).cloned().collect(),
     };
     let line = serde_json::to_string(&record).map_err(|error| error.to_string())?;
-    let path = state.data_dir.join("recognition-corrections.jsonl");
+    let path = data_dir.join("recognition-corrections.jsonl");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -365,6 +364,14 @@ fn record_recognition_correction(
         .map_err(|error| error.to_string())?;
     use std::io::Write as _;
     writeln!(file, "{line}").map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn record_recognition_correction(
+    correction: RecognitionCorrection,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    append_recognition_correction(&state.data_dir, &correction)
 }
 
 #[tauri::command]
@@ -797,6 +804,9 @@ fn resource_mime_type(path: &str) -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_settings(app.clone());
+        }))
         .register_uri_scheme_protocol("eneye-dict", dictionary_resource_response)
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -869,4 +879,45 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Eneye");
+}
+
+#[cfg(test)]
+mod correction_tests {
+    use super::*;
+
+    fn correction(corrected: &str) -> RecognitionCorrection {
+        RecognitionCorrection {
+            observed: "poll".into(),
+            corrected: corrected.into(),
+            source: Some("ocr".into()),
+            confidence: Some(0.72),
+            reason: Some("edit distance".into()),
+            candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn appends_corrections_as_json_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        append_recognition_correction(dir.path(), &correction("pollution")).expect("first");
+        append_recognition_correction(dir.path(), &correction("pollutant")).expect("second");
+        let text = std::fs::read_to_string(dir.path().join("recognition-corrections.jsonl"))
+            .expect("read corrections");
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+        assert_eq!(first["observed"], "poll");
+        assert_eq!(first["corrected"], "pollution");
+        assert_eq!(first["source"], "ocr");
+        assert!(first["at"].as_u64().unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn rejects_a_blank_correction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = append_recognition_correction(dir.path(), &correction("  "))
+            .expect_err("blank correction must be rejected");
+        assert!(error.contains("请填写"));
+        assert!(!dir.path().join("recognition-corrections.jsonl").exists());
+    }
 }

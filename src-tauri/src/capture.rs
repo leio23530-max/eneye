@@ -813,6 +813,45 @@ const DEFAULT_CARD_WIDTH: f64 = 360.0;
 const DEFAULT_CARD_HEIGHT: f64 = 520.0;
 const CARD_GAP: i32 = 12;
 
+#[cfg(windows)]
+fn monitor_work_area(point: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+
+    unsafe {
+        let monitor = MonitorFromPoint(
+            POINT {
+                x: point.0,
+                y: point.1,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        );
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        Some((
+            info.rcWork.left,
+            info.rcWork.top,
+            info.rcWork.right,
+            info.rcWork.bottom,
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn monitor_work_area(_point: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    None
+}
+
 fn place_card(
     point: (i32, i32),
     card: (u32, u32),
@@ -862,29 +901,7 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
     let window_size =
         tauri::PhysicalSize::new(card.0 + padding as u32 * 2, card.1 + padding as u32 * 2);
     let _ = window.set_size(window_size);
-    let monitor = app.available_monitors().ok().and_then(|monitors| {
-        monitors.into_iter().find(|monitor| {
-            let position = monitor.position();
-            let size = monitor.size();
-            point.0 >= position.x
-                && point.1 >= position.y
-                && point.0 < position.x + size.width as i32
-                && point.1 < position.y + size.height as i32
-        })
-    });
-    let work_area = monitor
-        .map(|monitor| {
-            let area = monitor.work_area();
-            let position = area.position;
-            let size = area.size;
-            (
-                position.x,
-                position.y,
-                position.x + size.width as i32,
-                position.y + size.height as i32,
-            )
-        })
-        .unwrap_or((0, 0, 1920, 1080));
+    let work_area = monitor_work_area(point).unwrap_or((0, 0, 1920, 1080));
     let (card_x, card_y) = place_card(point, card, overlay_offset(app), work_area);
     let _ = window.set_position(tauri::PhysicalPosition::new(
         card_x - padding,
