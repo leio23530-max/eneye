@@ -377,9 +377,9 @@ pub fn generate_ocr_candidates_at(
     // "ana1ysis"). clean_span rejects the raw token, so repair the whole
     // token while keeping the pointer on the same character.
     let raw_chars = raw.chars().collect::<Vec<_>>();
-    let pointer_on_letter = raw_chars
-        .get(pointer_char)
-        .is_some_and(|character| character.is_ascii_alphabetic());
+    let pointer_on_letter = raw_chars.get(pointer_char).is_some_and(|character| {
+        character.is_ascii_alphabetic() || matches!(character, '0' | '1' | '5')
+    });
     let has_internal_digit = raw_chars
         .iter()
         .any(|character| matches!(character, '0' | '1' | '5'));
@@ -744,30 +744,46 @@ fn spelling_variants(base: &[char]) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     let mut variants = Vec::new();
-    for (index, replacements) in &options {
-        for replacement in replacements {
-            let mut candidate = base.to_vec();
-            candidate[*index] = *replacement;
-            push_variant(&mut variants, &candidate);
-        }
-    }
-    for left in 0..options.len() {
-        for right in (left + 1)..options.len() {
-            for left_replacement in &options[left].1 {
-                for right_replacement in &options[right].1 {
-                    let mut candidate = base.to_vec();
-                    candidate[options[left].0] = *left_replacement;
-                    candidate[options[right].0] = *right_replacement;
-                    push_variant(&mut variants, &candidate);
-                }
-            }
-        }
-    }
+    let mut characters = base.to_vec();
+    collect_spelling_variants(&options, &mut characters, 0, 0, &mut variants);
     variants
 }
 
+/// Enumerates up to six simultaneous lookalike corrections. Real screenshots
+/// can turn every ambiguous glyph in a short word into a digit; two-correction
+/// variants cannot reconstruct those words from the dictionary.
+fn collect_spelling_variants(
+    options: &[(usize, Vec<char>)],
+    characters: &mut [char],
+    start: usize,
+    changes: usize,
+    variants: &mut Vec<String>,
+) {
+    if changes > 0 {
+        push_variant(variants, characters);
+    }
+    if changes >= 6 || variants.len() >= 512 {
+        return;
+    }
+    for index in start..options.len() {
+        let (position, replacements) = &options[index];
+        let original = characters[*position];
+        for replacement in replacements {
+            characters[*position] = *replacement;
+            collect_spelling_variants(options, characters, index + 1, changes + 1, variants);
+            if variants.len() >= 512 {
+                break;
+            }
+        }
+        characters[*position] = original;
+        if variants.len() >= 512 {
+            break;
+        }
+    }
+}
+
 fn push_variant(variants: &mut Vec<String>, characters: &[char]) {
-    if variants.len() >= 128 {
+    if variants.len() >= 512 {
         return;
     }
     let candidate = characters.iter().collect::<String>();
@@ -1162,6 +1178,15 @@ mod tests {
         let tokens = [token("pollut ion", 100.0, 190.0)];
         let got = best_at(&tokens, 150).map(|candidate| candidate.text);
         assert_eq!(got.as_deref(), Some("pollution"));
+    }
+
+    #[test]
+    fn reconstructs_a_word_with_multiple_ocr_digit_lookalikes() {
+        let tokens = [token("p011ut10n", 100.0, 90.0)];
+        for pointer in [104, 130, 155, 190] {
+            let got = best_at(&tokens, pointer).map(|candidate| candidate.text);
+            assert_eq!(got.as_deref(), Some("pollution"), "pointer {pointer}");
+        }
     }
 
     #[test]

@@ -1289,11 +1289,25 @@ fn ocr_word_candidates_at_with(
     let next_line = lines.get(line_index + 1).map(Vec::as_slice);
     let mut candidates =
         recognition::generate_ocr_candidates_at(&lines[line_index], word_index, x, y, next_line);
-    if has_letter_ink_right(&bmp, left, top, OCR_SCALE, &lines[line_index][word_index]) {
-        for candidate in &mut candidates {
-            if candidate.origin == "raw" {
-                candidate.visual_continuation = true;
-            }
+    let token = &lines[line_index][word_index];
+    let token_letters = token
+        .text
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    let ink_left = has_letter_ink_left(&bmp, left, top, OCR_SCALE, token);
+    let ink_right = has_letter_ink_right(&bmp, left, top, OCR_SCALE, token);
+    for candidate in &mut candidates {
+        let candidate_letters = candidate
+            .text
+            .chars()
+            .filter(|character| character.is_ascii_alphabetic())
+            .count();
+        // A token that starts mid-word cannot be repaired by looking only to
+        // its right. A token that ends mid-word may still be extended by a
+        // merge/hyphen candidate, so only same-width candidates are marked.
+        if ink_left || (ink_right && candidate_letters <= token_letters) {
+            candidate.visual_continuation = true;
         }
     }
     Ok(candidates)
@@ -1317,10 +1331,34 @@ fn virtual_screen_bounds() -> (i32, i32, i32, i32) {
     }
 }
 
-/// True when glyph ink starts immediately to the right of the OCR token and is
-/// tall/wide enough to be a letter, not a quote, period, or underline.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InkSide {
+    Left,
+    Right,
+}
+
+/// True when glyph ink starts immediately beside the OCR token and is tall/wide
+/// enough to be a letter, not a quote, period, or underline.
 #[cfg(windows)]
 fn has_letter_ink_right(bmp: &[u8], left: i32, top: i32, scale: f32, token: &OcrToken) -> bool {
+    has_letter_ink_side(bmp, left, top, scale, token, InkSide::Right)
+}
+
+/// True when the OCR token starts in the middle of a longer visible word.
+#[cfg(windows)]
+fn has_letter_ink_left(bmp: &[u8], left: i32, top: i32, scale: f32, token: &OcrToken) -> bool {
+    has_letter_ink_side(bmp, left, top, scale, token, InkSide::Left)
+}
+
+#[cfg(windows)]
+fn has_letter_ink_side(
+    bmp: &[u8],
+    left: i32,
+    top: i32,
+    scale: f32,
+    token: &OcrToken,
+    side: InkSide,
+) -> bool {
     let Ok(image) = image::load_from_memory(bmp) else {
         return false;
     };
@@ -1341,19 +1379,27 @@ fn has_letter_ink_right(bmp: &[u8], left: i32, top: i32, scale: f32, token: &Ocr
     if token_height < 8 {
         return false;
     }
-    let x0 = ((token.bounds.right() - left as f32) * scale).round() as i32;
     let y0 = ((token.bounds.y - top as f32) * scale).round() as i32;
     let band_top = y0 + (token_height as f32 * 0.10) as i32;
     let band_bottom = y0 + (token_height as f32 * 0.78) as i32;
-    if x0 < 0 || x0 >= width as i32 || band_top < 0 || band_bottom >= height as i32 {
+    let edge = match side {
+        InkSide::Right => ((token.bounds.right() - left as f32) * scale).round() as i32,
+        InkSide::Left => ((token.bounds.x - left as f32) * scale).round() as i32,
+    };
+    if edge < 0 || edge >= width as i32 || band_top < 0 || band_bottom >= height as i32 {
         return false;
     }
 
     let max_search = (token_height as f32 * 0.55).max(6.0) as i32;
     let mut first_ink = None;
-    for dx in 0..max_search {
-        let x = x0 + dx;
-        if x >= width as i32 {
+    let mut separated = side == InkSide::Right;
+    let start = if side == InkSide::Right { 0 } else { 1 };
+    for step in start..max_search {
+        let x = match side {
+            InkSide::Right => edge + step,
+            InkSide::Left => edge - step,
+        };
+        if x < 0 || x >= width as i32 {
             break;
         }
         let mut count = 0;
@@ -1363,22 +1409,36 @@ fn has_letter_ink_right(bmp: &[u8], left: i32, top: i32, scale: f32, token: &Ocr
             }
         }
         if count >= 2 {
-            first_ink = Some(dx);
-            break;
+            // On the left, ink touching the token box is the first glyph
+            // itself; a real preceding glyph must be separated by a gap.
+            if separated {
+                first_ink = Some(step);
+                break;
+            }
+        } else {
+            separated = true;
         }
     }
     let Some(first_ink) = first_ink else {
         return false;
     };
-    if first_ink as f32 > token_height as f32 * 0.22 {
+    let max_first_ink = if side == InkSide::Left {
+        token_height as f32 * 0.45
+    } else {
+        token_height as f32 * 0.22
+    };
+    if first_ink as f32 > max_first_ink {
         return false;
     }
 
     let extension_width = (token_height as f32 * 0.9) as i32;
     let mut dark_pixels = 0;
-    for dx in first_ink..first_ink + extension_width {
-        let x = x0 + dx;
-        if x >= width as i32 {
+    for step in first_ink..first_ink + extension_width {
+        let x = match side {
+            InkSide::Right => edge + step,
+            InkSide::Left => edge - step,
+        };
+        if x < 0 || x >= width as i32 {
             break;
         }
         for y in band_top..=band_bottom {
@@ -1974,6 +2034,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn sees_letter_ink_left_when_a_token_starts_mid_word() {
+        let image = include_bytes!("../tests/fixtures/ocr-pollution.png");
+        let suffix = OcrToken {
+            text: "ollution".into(),
+            bounds: OcrBox {
+                x: 70.0,
+                y: 18.0,
+                width: 140.0,
+                height: 33.0,
+            },
+        };
+        assert!(has_letter_ink_left(image, 0, 0, 1.0, &suffix));
+        let complete = OcrToken {
+            text: "pollution".into(),
+            bounds: OcrBox {
+                x: 22.0,
+                y: 18.0,
+                width: 194.0,
+                height: 33.0,
+            },
+        };
+        assert!(!has_letter_ink_left(image, 0, 0, 1.0, &complete));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn real_pollution_fixture_never_selects_a_prefix() {
         let result =
             recognize_image_bytes(include_bytes!("../tests/fixtures/ocr-pollution.png")).unwrap();
@@ -2062,7 +2148,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "v0.2 C-01: real Notepad OCR currently yields p011ut10n; Phase 1 must recover pollution generically"]
     fn notepad_fixture_ocr_recovers_pollution_at_every_letter() {
         let result =
             recognize_image_bytes(include_bytes!("../tests/fixtures/notepad-pollution.png"))

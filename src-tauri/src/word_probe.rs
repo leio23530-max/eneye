@@ -306,7 +306,9 @@ fn probe_msaa(_point: (i32, i32)) -> Option<String> {
 fn probe_win32_text(point: (i32, i32)) -> Option<String> {
     use windows::Win32::{
         Foundation::{HWND, POINT, RECT},
-        UI::WindowsAndMessaging::{GetClassNameW, GetWindowRect, GetWindowTextW, WindowFromPoint},
+        UI::WindowsAndMessaging::{
+            GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, WindowFromPoint,
+        },
     };
 
     let hwnd = unsafe {
@@ -324,12 +326,21 @@ fn probe_win32_text(point: (i32, i32)) -> Option<String> {
     if !is_text_control_class(&class_name) {
         return None;
     }
-    let mut text_buffer = [0_u16; 8192];
-    let text_len = unsafe { GetWindowTextW(hwnd, &mut text_buffer) };
-    if text_len <= 0 {
+    let text_len = unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize;
+    if text_len == 0 {
         return None;
     }
-    let text = String::from_utf16_lossy(&text_buffer[..text_len as usize]);
+    let mut text_buffer = vec![0_u16; text_len + 1];
+    let copied = unsafe { GetWindowTextW(hwnd, &mut text_buffer) };
+    if copied <= 0 {
+        return None;
+    }
+    let text = String::from_utf16_lossy(&text_buffer[..copied as usize]);
+    if is_edit_control_class(&class_name)
+        && let Some(word) = word_from_edit_point(hwnd, &text, point)
+    {
+        return Some(word);
+    }
     let mut rect = RECT::default();
     unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
     word_from_text_at_x(
@@ -344,16 +355,74 @@ fn probe_win32_text(point: (i32, i32)) -> Option<String> {
     )
 }
 
+/// Edit and RichEdit controls expose exact character positions even when they
+/// are multiline and have no UI Automation TextPattern. This is the only
+/// reliable word source for Notepad, whose full text is one long Name string.
+#[cfg(windows)]
+fn word_from_edit_point(
+    hwnd: windows::Win32::Foundation::HWND,
+    text: &str,
+    point: (i32, i32),
+) -> Option<String> {
+    use windows::Win32::{
+        Foundation::{LPARAM, POINT, WPARAM},
+        Graphics::Gdi::ScreenToClient,
+        UI::{Controls::EM_CHARFROMPOS, WindowsAndMessaging::SendMessageW},
+    };
+
+    let mut client = POINT {
+        x: point.0,
+        y: point.1,
+    };
+    if !unsafe { ScreenToClient(hwnd, &mut client) }.as_bool() {
+        return None;
+    }
+    let lparam = (((client.y as u16 as u32) << 16) | (client.x as u16 as u32)) as isize;
+    let index =
+        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0;
+    if index < 0 {
+        return None;
+    }
+    word_from_text_character_index(text, index as usize)
+}
+
+fn word_from_text_character_index(text: &str, index: usize) -> Option<String> {
+    let utf16 = text.encode_utf16().collect::<Vec<_>>();
+    let character = *utf16.get(index)?;
+    let is_word = |value: u16| {
+        char::from_u32(value as u32).is_some_and(|character| {
+            character.is_ascii_alphabetic() || character == '\'' || character == '-'
+        })
+    };
+    if !is_word(character) {
+        return None;
+    }
+    let mut start = index;
+    while start > 0 && is_word(utf16[start - 1]) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < utf16.len() && is_word(utf16[end]) {
+        end += 1;
+    }
+    let word = String::from_utf16(&utf16[start..end]).ok()?;
+    clean_lookup_word(&word).ok()
+}
+
 #[cfg(not(windows))]
 fn probe_win32_text(_point: (i32, i32)) -> Option<String> {
     None
 }
 
+fn is_edit_control_class(class_name: &str) -> bool {
+    let class_name = class_name.to_ascii_lowercase();
+    class_name == "edit" || class_name.starts_with("richedit")
+}
+
 fn is_text_control_class(class_name: &str) -> bool {
     let class_name = class_name.to_ascii_lowercase();
-    class_name == "edit"
+    is_edit_control_class(&class_name)
         || class_name == "static"
-        || class_name.starts_with("richedit")
         || class_name.contains("scintilla")
         || class_name.contains("textedit")
 }
@@ -633,6 +702,146 @@ mod tests {
     fn accepts_standard_edit_control_classes() {
         assert!(is_text_control_class("Edit"));
         assert!(is_text_control_class("RichEdit20W"));
+        assert!(is_edit_control_class("Edit"));
+        assert!(is_edit_control_class("RichEditD2DPT"));
+        assert!(!is_edit_control_class("Static"));
         assert!(!is_text_control_class("Chrome_WidgetWin_1"));
+    }
+
+    #[test]
+    fn maps_a_multiline_edit_character_to_its_whole_word() {
+        let text = "pollution war on pollution\r\nA)As being a greater threat.\r\nnanogenerator";
+        assert_eq!(
+            word_from_text_character_index(text, 1).as_deref(),
+            Some("pollution")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 8).as_deref(),
+            Some("pollution")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 12).as_deref(),
+            Some("war")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 15).as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 18).as_deref(),
+            Some("pollution")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 33).as_deref(),
+            Some("being")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 58).as_deref(),
+            Some("nanogenerator")
+        );
+    }
+
+    #[test]
+    fn rejects_blank_space_and_list_markers_in_an_edit_control() {
+        let text = "A)As being a greater threat.\r\npollution";
+        assert_eq!(word_from_text_character_index(text, 1), None);
+        assert_eq!(word_from_text_character_index(text, 4), None);
+        assert_eq!(word_from_text_character_index(text, 28), None);
+        assert_eq!(word_from_text_character_index(text, 1000), None);
+    }
+
+    #[test]
+    fn keeps_internal_apostrophes_and_hyphens_for_edit_probe() {
+        let text = "don't well-known";
+        assert_eq!(
+            word_from_text_character_index(text, 2).as_deref(),
+            Some("don't")
+        );
+        assert_eq!(
+            word_from_text_character_index(text, 11).as_deref(),
+            Some("well-known")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn real_edit_control_maps_every_pollution_letter_to_the_whole_word() {
+        use windows::Win32::{
+            Foundation::{LPARAM, POINT, WPARAM},
+            Graphics::Gdi::{ClientToScreen, UpdateWindow},
+            UI::{
+                Controls::EM_POSFROMCHAR,
+                WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE, SW_SHOW,
+                    SendMessageW, SetWindowTextW, ShowWindow, WINDOW_STYLE, WS_BORDER, WS_CHILD,
+                    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                },
+            },
+        };
+        use windows::core::{HSTRING, w};
+
+        let parent = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("Eneye probe test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                320,
+                320,
+                640,
+                360,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("probe parent window");
+        let text = "pollution war on pollution\r\nA)As being a greater threat.";
+        let edit = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("EDIT"),
+                w!(""),
+                WS_CHILD
+                    | WS_VISIBLE
+                    | WS_BORDER
+                    | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL) as u32),
+                10,
+                10,
+                600,
+                300,
+                Some(parent),
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("probe edit control");
+        unsafe {
+            SetWindowTextW(edit, &HSTRING::from(text)).expect("probe text");
+            let _ = ShowWindow(parent, SW_SHOW);
+            let _ = UpdateWindow(parent);
+        }
+
+        for index in 0..9 {
+            let packed =
+                unsafe { SendMessageW(edit, EM_POSFROMCHAR, Some(WPARAM(index)), Some(LPARAM(0))) }
+                    .0;
+            let x = (packed & 0xffff) as u16 as i16 as i32;
+            let y = ((packed >> 16) & 0xffff) as u16 as i16 as i32;
+            let mut point = POINT { x: x + 2, y: y + 5 };
+            unsafe { ClientToScreen(edit, &mut point) }
+                .ok()
+                .expect("screen point");
+            assert_eq!(
+                word_from_edit_point(edit, text, (point.x, point.y)).as_deref(),
+                Some("pollution"),
+                "character {index} at ({x}, {y})"
+            );
+        }
+
+        unsafe { DestroyWindow(parent) }.expect("destroy probe window");
     }
 }
