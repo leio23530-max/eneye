@@ -655,6 +655,14 @@ fn end_overlay_drag(state: State<'_, AppState>) {
 
 #[tauri::command]
 fn hide_overlay(app: tauri::AppHandle, state: State<'_, AppState>) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"F:\DSH\tmp\eneye-overlay-trace.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "COMMAND HIDE");
+    }
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.hide();
     }

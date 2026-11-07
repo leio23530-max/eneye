@@ -80,6 +80,10 @@ impl Default for WordProbeReport {
 pub struct AccessibleProbe {
     pub word: Option<(String, &'static str)>,
     pub report: WordProbeReport,
+    /// True when the pointer is on an Edit/RichEdit control whose exact text
+    /// path was authoritative. A missing word there means "not a word" rather
+    /// than "unknown", so OCR must not invent one from the surrounding pixels.
+    pub exact_text_control: bool,
 }
 
 pub fn probe_accessible(
@@ -88,6 +92,37 @@ pub fn probe_accessible(
 ) -> AccessibleProbe {
     let started = Instant::now();
     let mut report = WordProbeReport::default();
+    let exact_text_control = is_exact_edit_control_at(point);
+
+    // Edit/RichEdit controls can report exact character positions even when
+    // UIA only exposes the whole document as one Name string. Ask the exact
+    // path first so a pointer on punctuation or blank space cannot be turned
+    // into a nearby word by UIA/MSAA/OCR.
+    if exact_text_control {
+        let win32_started = Instant::now();
+        let win32_word = probe_win32_text(point);
+        report.stages[0].detail = "精确输入控件优先，跳过 UIA".into();
+        report.stages[1].detail = "精确输入控件优先，跳过 MSAA".into();
+        report.stages[2] = ProbeStage {
+            provider: "win32".into(),
+            available: win32_word.is_some(),
+            duration_ms: elapsed_ms(win32_started),
+            detail: win32_word
+                .as_ref()
+                .map(|word| format!("命中 {word}"))
+                .unwrap_or_else(|| "精确字符位置不是单词".into()),
+        };
+        report.total_ms = elapsed_ms(started);
+        if let Some(text) = win32_word.as_ref() {
+            report.word = Some(text.clone());
+            report.source = Some("win32".into());
+        }
+        return AccessibleProbe {
+            word: win32_word.map(|text| (text, "win32")),
+            report,
+            exact_text_control: true,
+        };
+    }
 
     let uia_started = Instant::now();
     let uia_word = probe_uia(automation, point);
@@ -107,6 +142,7 @@ pub fn probe_accessible(
         return AccessibleProbe {
             word: Some((word, source)),
             report,
+            exact_text_control,
         };
     }
 
@@ -128,6 +164,7 @@ pub fn probe_accessible(
         return AccessibleProbe {
             word: Some((word, "msaa")),
             report,
+            exact_text_control,
         };
     }
 
@@ -149,11 +186,16 @@ pub fn probe_accessible(
         return AccessibleProbe {
             word: Some((word, "win32")),
             report,
+            exact_text_control,
         };
     }
 
     report.total_ms = elapsed_ms(started);
-    AccessibleProbe { word: None, report }
+    AccessibleProbe {
+        word: None,
+        report,
+        exact_text_control,
+    }
 }
 
 pub fn update_ocr_stage(
@@ -362,20 +404,108 @@ fn probe_win32_text(point: (i32, i32)) -> Option<String> {
     )
 }
 
+#[cfg(windows)]
+fn is_exact_edit_control_at(point: (i32, i32)) -> bool {
+    use windows::Win32::{
+        Foundation::{HWND, POINT, RECT},
+        Graphics::Gdi::ScreenToClient,
+        UI::WindowsAndMessaging::{GetClassNameW, GetClientRect, WindowFromPoint},
+    };
+
+    let hwnd: HWND = unsafe {
+        WindowFromPoint(POINT {
+            x: point.0,
+            y: point.1,
+        })
+    };
+    if hwnd == HWND::default() {
+        return false;
+    }
+    let mut class_name = [0_u16; 256];
+    let class_len = unsafe { GetClassNameW(hwnd, &mut class_name) };
+    let class_name = String::from_utf16_lossy(&class_name[..class_len.max(0) as usize]);
+    if !is_edit_control_class(&class_name) {
+        return false;
+    }
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+        return false;
+    }
+    let mut client_point = POINT {
+        x: point.0,
+        y: point.1,
+    };
+    if !unsafe { ScreenToClient(hwnd, &mut client_point) }.as_bool() {
+        return false;
+    }
+    client_point.x >= 0
+        && client_point.y >= 0
+        && client_point.x < client.right
+        && client_point.y < client.bottom
+}
+
+#[cfg(not(windows))]
+fn is_exact_edit_control_at(_point: (i32, i32)) -> bool {
+    false
+}
+
 /// Edit and RichEdit controls expose exact character positions even when they
 /// are multiline and have no UI Automation TextPattern. This is the only
 /// reliable word source for Notepad, whose full text is one long Name string.
+#[cfg(windows)]
+fn exact_edit_character_index(
+    hwnd: windows::Win32::Foundation::HWND,
+    client: windows::Win32::Foundation::POINT,
+) -> Option<isize> {
+    use windows::Win32::{
+        Foundation::{LPARAM, WPARAM},
+        UI::{
+            Controls::{EM_CHARFROMPOS, EM_POSFROMCHAR},
+            WindowsAndMessaging::SendMessageW,
+        },
+    };
+
+    let lparam = (((client.y as u16 as u32) << 16) | (client.x as u16 as u32)) as isize;
+    let mut index =
+        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0
+            & 0xffff;
+    if index < 0 {
+        return None;
+    }
+
+    // EM_CHARFROMPOS returns the nearest character, so a pointer just before
+    // a glyph can snap forward to the next character (for example ")" snapping
+    // to the "A" in "A)As"). Walk left until the pointer is inside the cell
+    // that starts at or before it.
+    for _ in 0..8 {
+        let packed = unsafe {
+            SendMessageW(
+                hwnd,
+                EM_POSFROMCHAR,
+                Some(WPARAM(index as usize)),
+                Some(LPARAM(0)),
+            )
+        }
+        .0;
+        let cell_left = (packed & 0xffff) as u16 as i16 as i32;
+        if client.x >= cell_left {
+            return Some(index);
+        }
+        if index == 0 {
+            return None;
+        }
+        index -= 1;
+    }
+    Some(index)
+}
+
 #[cfg(windows)]
 fn word_from_edit_point(
     hwnd: windows::Win32::Foundation::HWND,
     text: &str,
     point: (i32, i32),
 ) -> Option<String> {
-    use windows::Win32::{
-        Foundation::{LPARAM, POINT, WPARAM},
-        Graphics::Gdi::ScreenToClient,
-        UI::{Controls::EM_CHARFROMPOS, WindowsAndMessaging::SendMessageW},
-    };
+    use windows::Win32::{Foundation::POINT, Graphics::Gdi::ScreenToClient};
 
     let mut client = POINT {
         x: point.0,
@@ -384,13 +514,7 @@ fn word_from_edit_point(
     if !unsafe { ScreenToClient(hwnd, &mut client) }.as_bool() {
         return None;
     }
-    let lparam = (((client.y as u16 as u32) << 16) | (client.x as u16 as u32)) as isize;
-    let index =
-        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0
-            & 0xffff;
-    if index < 0 {
-        return None;
-    }
+    let index = exact_edit_character_index(hwnd, client)?;
     word_from_text_character_index(text, index as usize)
 }
 
@@ -407,7 +531,7 @@ fn word_from_edit_line(
         Foundation::{LPARAM, POINT, WPARAM},
         Graphics::Gdi::ScreenToClient,
         UI::{
-            Controls::{EM_CHARFROMPOS, EM_LINEFROMCHAR, EM_LINEINDEX, EM_LINELENGTH},
+            Controls::{EM_LINEFROMCHAR, EM_LINEINDEX, EM_LINELENGTH},
             WindowsAndMessaging::{SendMessageW, WM_GETTEXT},
         },
     };
@@ -419,13 +543,7 @@ fn word_from_edit_line(
     if !unsafe { ScreenToClient(hwnd, &mut client) }.as_bool() {
         return None;
     }
-    let lparam = (((client.y as u16 as u32) << 16) | (client.x as u16 as u32)) as isize;
-    let index =
-        unsafe { SendMessageW(hwnd, EM_CHARFROMPOS, Some(WPARAM(0)), Some(LPARAM(lparam))) }.0
-            & 0xffff;
-    if index < 0 {
-        return None;
-    }
+    let index = exact_edit_character_index(hwnd, client)?;
     let line = unsafe {
         SendMessageW(
             hwnd,

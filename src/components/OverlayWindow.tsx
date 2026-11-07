@@ -8,7 +8,10 @@ import {
   translateSelection,
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/tauri";
-import { applyTranslationEvent } from "../lib/translation-state";
+import {
+  applyTranslationEvent,
+  applyTranslationFailure,
+} from "../lib/translation-state";
 import { SAMPLE_LOOKUP } from "../data/sample";
 import type {
   AppSettings,
@@ -151,13 +154,11 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
       targetLanguage: settings.targetLanguage,
       source: "uia",
       kind: "explain",
-    }).catch((error) => {
+    }).catch((error) =>
       setTranslation((current) =>
-        current
-          ? { ...current, status: "error", error: String(error) }
-          : current,
-      );
-    });
+        applyTranslationFailure(current, requestId, error),
+      ),
+    );
   }
 
   function retryTranslation() {
@@ -178,13 +179,11 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
       targetLanguage: settings.targetLanguage,
       source: "uia",
       kind: translation.kind,
-    }).catch((error) => {
+    }).catch((error) =>
       setTranslation((current) =>
-        current
-          ? { ...current, status: "error", error: String(error) }
-          : current,
-      );
-    });
+        applyTranslationFailure(current, requestId, error),
+      ),
+    );
   }
 
   if (lookup) {

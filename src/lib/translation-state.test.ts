@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { TranslationState } from "../types";
-import { applyTranslationEvent } from "./translation-state";
+import {
+  applyTranslationEvent,
+  applyTranslationFailure,
+} from "./translation-state";
 
 const current: TranslationState = {
   requestId: "request-1",
@@ -54,5 +57,49 @@ describe("applyTranslationEvent", () => {
       error: "API Key 无效",
     });
     expect(failed).toMatchObject({ status: "error", error: "API Key 无效" });
+  });
+});
+
+describe("applyTranslationFailure", () => {
+  it("turns a cancelled command rejection into the neutral stopped state", () => {
+    const failed = applyTranslationFailure(
+      current,
+      "request-1",
+      "translation cancelled",
+    );
+    expect(failed).toMatchObject({
+      status: "cancelled",
+      output: "污",
+      error: undefined,
+    });
+  });
+
+  it("keeps a provider error visible", () => {
+    const failed = applyTranslationFailure(
+      current,
+      "request-1",
+      "API 服务返回 401",
+    );
+    expect(failed).toMatchObject({
+      status: "error",
+      error: "API 服务返回 401",
+    });
+  });
+
+  it("ignores a failure from a stale request", () => {
+    expect(applyTranslationFailure(current, "request-0", "旧错误")).toBe(
+      current,
+    );
+  });
+
+  it("does not downgrade a completed translation", () => {
+    const complete: TranslationState = {
+      ...current,
+      status: "complete",
+      output: "污染",
+    };
+    expect(
+      applyTranslationFailure(complete, "request-1", "translation cancelled"),
+    ).toBe(complete);
   });
 });

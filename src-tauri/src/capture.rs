@@ -44,11 +44,15 @@ fn decide_uia_ocr(
     uia_evidence: &WordEvidence,
 ) -> UiaOcrDecision {
     if visual_prefix {
-        return if uia_text.eq_ignore_ascii_case(&best.text) {
-            UiaOcrDecision::ClearUia
-        } else {
-            UiaOcrDecision::KeepUia
-        };
+        // OCR seeing exactly the same word as UIA is agreement, not a visual
+        // prefix. Chrome can flag a whole italic word as a continuation when
+        // the neighbouring quote/space is close enough to produce ink beside
+        // the token. Only discard the UIA word when the OCR token agrees but
+        // the dictionary cannot confirm the result.
+        if !uia_text.eq_ignore_ascii_case(&best.text) || uia_evidence.dictionary_hit {
+            return UiaOcrDecision::KeepUia;
+        }
+        return UiaOcrDecision::ClearUia;
     }
     let uia_lower = uia_text.to_lowercase();
     let ocr_lower = best.text.to_lowercase();
@@ -393,20 +397,23 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                             }
                             UiaOcrDecision::KeepUia => {}
                         }
-                        // Hard veto after reconciliation: a visually truncated
-                        // prefix must never be committed as the UIA result.
-                        if visual_prefix
-                            && accessible
-                                .word
-                                .as_ref()
-                                .is_some_and(|(text, _)| text.eq_ignore_ascii_case(&best.text))
-                        {
-                            accessible.word = None;
-                        }
                     }
                 }
 
+                let exact_text_control = accessible.exact_text_control;
+                let no_word_report = accessible.report.clone();
                 let candidate = match accessible.word {
+                    None if exact_text_control => {
+                        if let Ok(mut last_probe) = app.state::<AppState>().last_word_probe.lock() {
+                            *last_probe = no_word_report;
+                        }
+                        preflight = None;
+                        resolved_for_dwell = true;
+                        if !keeps_existing_card(&app) {
+                            hide_overlay(&app);
+                        }
+                        continue;
+                    }
                     Some((text, "msaa")) => HoverCandidate::Word {
                         text,
                         source: "msaa".into(),
@@ -743,6 +750,7 @@ fn show_lookup(app: &tauri::AppHandle, lookup: crate::models::LookupResult, poin
         let _ = window.emit("eneye://lookup", lookup);
         position_overlay(app, point);
         let _ = window.show();
+        force_show_overlay(&window);
     }
 }
 
@@ -755,6 +763,7 @@ fn show_selection(app: &tauri::AppHandle, payload: SelectionPayload, point: (i32
         let _ = window.emit("eneye://selection", payload.clone());
         position_overlay(app, point);
         let _ = window.show();
+        force_show_overlay(&window);
     }
 
     let app_handle = app.clone();
@@ -854,6 +863,53 @@ fn monitor_work_area(_point: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
     None
 }
 
+#[cfg(windows)]
+fn monitor_scale(point: (i32, i32)) -> Option<f64> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+
+    let monitor = unsafe {
+        MonitorFromPoint(
+            POINT {
+                x: point.0,
+                y: point.1,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        )
+    };
+    if monitor.is_invalid() {
+        return None;
+    }
+    let mut dpi_x = 96u32;
+    let mut dpi_y = 96u32;
+    unsafe {
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).ok()?;
+    }
+    if dpi_x == 0 {
+        return None;
+    }
+    Some(f64::from(dpi_x) / 96.0)
+}
+
+#[cfg(not(windows))]
+fn monitor_scale(_point: (i32, i32)) -> Option<f64> {
+    None
+}
+
+fn physical_metrics(scale: f64, card_height: u32, offset: (i32, i32)) -> (i32, (u32, u32), (i32, i32)) {
+    let padding = (CARD_STAGE_PADDING * scale).round() as i32;
+    let card = (
+        (DEFAULT_CARD_WIDTH * scale).round() as u32,
+        (f64::from(card_height) * scale).round() as u32,
+    );
+    let offset = (
+        (f64::from(offset.0) * scale).round() as i32,
+        (f64::from(offset.1) * scale).round() as i32,
+    );
+    (padding, card, offset)
+}
+
 fn place_card(
     point: (i32, i32),
     card: (u32, u32),
@@ -883,7 +939,12 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
     let Some(window) = app.get_webview_window("overlay") else {
         return;
     };
-    let scale = window.scale_factor().unwrap_or(1.0);
+    // Use the target monitor's DPI, not the window's current monitor: moving an
+    // existing overlay to a 150% screen must scale the offset and card metrics
+    // even before the window has physically arrived there.
+    let scale = monitor_scale(point)
+        .or_else(|| window.scale_factor().ok())
+        .unwrap_or(1.0);
     let stored = app
         .state::<AppState>()
         .overlay_card_bounds
@@ -899,21 +960,13 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
                 .clamp(CARD_MIN_HEIGHT as u32, CARD_MAX_HEIGHT as u32)
         })
         .unwrap_or(DEFAULT_CARD_HEIGHT as u32);
-    let padding = (CARD_STAGE_PADDING * scale).round() as i32;
+    let (padding, physical_card, physical_offset) =
+        physical_metrics(scale, card_height, overlay_offset(app));
     let window_size = tauri::LogicalSize::new(
         DEFAULT_CARD_WIDTH + CARD_STAGE_PADDING * 2.0,
         card_height as f64 + CARD_STAGE_PADDING * 2.0,
     );
     let _ = window.set_size(window_size);
-    let physical_card = (
-        (DEFAULT_CARD_WIDTH * scale).round() as u32,
-        (card_height as f64 * scale).round() as u32,
-    );
-    let offset = overlay_offset(app);
-    let physical_offset = (
-        (offset.0 as f64 * scale).round() as i32,
-        (offset.1 as f64 * scale).round() as i32,
-    );
     let work_area = monitor_work_area(point).unwrap_or((0, 0, 1920, 1080));
     let (card_x, card_y) = place_card(point, physical_card, physical_offset, work_area);
     let _ = window.set_position(tauri::PhysicalPosition::new(
@@ -955,10 +1008,41 @@ pub(crate) fn update_card_bounds(app: &tauri::AppHandle, bounds: Option<OverlayB
     }
 }
 
+#[cfg(windows)]
+fn force_show_overlay(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SetWindowPos, ShowWindow,
+    };
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn force_show_overlay(_window: &tauri::WebviewWindow) {}
+
 fn overlay_is_visible(app: &tauri::AppHandle) -> bool {
-    app.get_webview_window("overlay")
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false)
+    let Some(window) = app.get_webview_window("overlay") else {
+        return false;
+    };
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        return unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() };
+    }
+    window.is_visible().unwrap_or(false)
 }
 
 fn sync_overlay_cursor_passthrough(
@@ -1970,11 +2054,27 @@ mod tests {
         );
         assert_eq!(
             decide_uia_ocr("poll", &prefix, true, &evidence),
+            UiaOcrDecision::KeepUia,
+            "OCR and UIA agreeing on a dictionary word is not evidence of truncation"
+        );
+        let unknown = WordEvidence {
+            dictionary_hit: false,
+            ..evidence
+        };
+        assert_eq!(
+            decide_uia_ocr("poll", &prefix, true, &unknown),
             UiaOcrDecision::ClearUia
         );
         assert_eq!(
             decide_uia_ocr("pollution", &prefix, false, &evidence),
             UiaOcrDecision::KeepUia
+        );
+
+        let same = ocr_candidate("being", 0.91, true);
+        assert_eq!(
+            decide_uia_ocr("being", &same, true, &evidence),
+            UiaOcrDecision::KeepUia,
+            "a complete italic word must not be discarded when OCR agrees"
         );
 
         let full = ocr_candidate("pollution", 0.94, true);
@@ -2127,6 +2227,13 @@ mod tests {
             place_card((800, 300), (320, 400), (240, 240), work),
             (1040, 540)
         );
+    }
+
+    #[test]
+    fn scales_card_and_offset_for_the_target_monitor() {
+        assert_eq!(physical_metrics(1.0, 520, (20, 20)), (8, (360, 520), (20, 20)));
+        assert_eq!(physical_metrics(1.5, 520, (20, 20)), (12, (540, 780), (30, 30)));
+        assert_eq!(physical_metrics(2.0, 520, (240, 120)), (16, (720, 1040), (480, 240)));
     }
 
     #[test]
