@@ -2062,6 +2062,63 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[ignore = "v0.2 C-01: real Notepad OCR currently yields p011ut10n; Phase 1 must recover pollution generically"]
+    fn notepad_fixture_ocr_recovers_pollution_at_every_letter() {
+        let result =
+            recognize_image_bytes(include_bytes!("../tests/fixtures/notepad-pollution.png"))
+                .unwrap();
+        let mut tokens = Vec::new();
+        for line in result.Lines().unwrap() {
+            for word in line.Words().unwrap() {
+                let bounds = word.BoundingRect().unwrap();
+                tokens.push(OcrToken {
+                    text: word.Text().unwrap().to_string(),
+                    bounds: OcrBox {
+                        x: bounds.X,
+                        y: bounds.Y,
+                        width: bounds.Width,
+                        height: bounds.Height,
+                    },
+                });
+            }
+        }
+        let selected = tokens
+            .iter()
+            .position(|token| {
+                token.bounds.x >= 200.0
+                    && token.bounds.x < 260.0
+                    && token.bounds.y < 30.0
+                    && token.text.chars().count() >= 5
+            })
+            .expect("the pollution OCR token");
+        let y = (tokens[selected].bounds.y + tokens[selected].bounds.height / 2.0).round() as i32;
+        let left = tokens[selected].bounds.x;
+        let width = tokens[selected].bounds.width;
+        for fraction in [0.05_f32, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90] {
+            let pointer_x = (left + width * fraction).round() as i32;
+            let generated =
+                recognition::generate_ocr_candidates_at(&tokens, selected, pointer_x, y, None);
+            let ranked = recognition::rank_generated(&generated, |word| {
+                let hit = word == "pollution" || word == "poll";
+                WordEvidence {
+                    dictionary_hit: hit,
+                    frq: hit.then_some(1200),
+                    bnc: None,
+                    collins: if hit { 4 } else { 0 },
+                    oxford: hit,
+                }
+            });
+            assert_eq!(
+                recognition::choose_best(ranked).map(|candidate| candidate.text),
+                Some("pollution".into()),
+                "pointer fraction {fraction}; OCR token {:?}",
+                tokens[selected].text
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_ocr_recognizes_english_from_an_image() {
         let result =
             recognize_image_bytes(include_bytes!("../tests/fixtures/ocr-english.png")).unwrap();
