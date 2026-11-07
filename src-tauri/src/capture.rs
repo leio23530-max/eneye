@@ -811,6 +811,8 @@ fn captures_escape(mode: OverlayMode) -> bool {
 const CARD_STAGE_PADDING: f64 = 8.0;
 const DEFAULT_CARD_WIDTH: f64 = 360.0;
 const DEFAULT_CARD_HEIGHT: f64 = 520.0;
+const CARD_MIN_HEIGHT: f64 = 120.0;
+const CARD_MAX_HEIGHT: f64 = 520.0;
 const CARD_GAP: i32 = 12;
 
 #[cfg(windows)]
@@ -888,21 +890,32 @@ pub(crate) fn position_overlay(app: &tauri::AppHandle, point: (i32, i32)) {
         .lock()
         .ok()
         .and_then(|bounds| *bounds);
-    let card = stored
-        .filter(|bounds| bounds.width > 0 && bounds.height > 0)
-        .map(|bounds| (bounds.width, bounds.height))
-        .unwrap_or_else(|| {
-            (
-                (DEFAULT_CARD_WIDTH * scale).round() as u32,
-                (DEFAULT_CARD_HEIGHT * scale).round() as u32,
-            )
-        });
+    // Card height is reported in CSS pixels by the overlay. The window is sized in
+    // logical pixels as well, so the WebView keeps a stable CSS viewport on every DPI.
+    let card_height = stored
+        .map(|bounds| {
+            bounds
+                .height
+                .clamp(CARD_MIN_HEIGHT as u32, CARD_MAX_HEIGHT as u32)
+        })
+        .unwrap_or(DEFAULT_CARD_HEIGHT as u32);
     let padding = (CARD_STAGE_PADDING * scale).round() as i32;
-    let window_size =
-        tauri::PhysicalSize::new(card.0 + padding as u32 * 2, card.1 + padding as u32 * 2);
+    let window_size = tauri::LogicalSize::new(
+        DEFAULT_CARD_WIDTH + CARD_STAGE_PADDING * 2.0,
+        card_height as f64 + CARD_STAGE_PADDING * 2.0,
+    );
     let _ = window.set_size(window_size);
+    let physical_card = (
+        (DEFAULT_CARD_WIDTH * scale).round() as u32,
+        (card_height as f64 * scale).round() as u32,
+    );
+    let offset = overlay_offset(app);
+    let physical_offset = (
+        (offset.0 as f64 * scale).round() as i32,
+        (offset.1 as f64 * scale).round() as i32,
+    );
     let work_area = monitor_work_area(point).unwrap_or((0, 0, 1920, 1080));
-    let (card_x, card_y) = place_card(point, card, overlay_offset(app), work_area);
+    let (card_x, card_y) = place_card(point, physical_card, physical_offset, work_area);
     let _ = window.set_position(tauri::PhysicalPosition::new(
         card_x - padding,
         card_y - padding,
@@ -926,14 +939,13 @@ pub(crate) fn update_card_bounds(app: &tauri::AppHandle, bounds: Option<OverlayB
     if let Ok(mut current) = state.overlay_card_bounds.lock() {
         *current = bounds;
     }
-    let size_changed = match (previous, bounds) {
-        (Some(previous), Some(bounds)) => {
-            previous.width != bounds.width || previous.height != bounds.height
-        }
+    // Width is fixed by the stage; only a height change needs a window resize.
+    let height_changed = match (previous, bounds) {
+        (Some(previous), Some(bounds)) => previous.height != bounds.height,
         (None, Some(_)) => true,
         _ => false,
     };
-    if size_changed
+    if height_changed
         && !dragging
         && overlay_is_visible(app)
         && !overlay_pinned(app)
@@ -970,30 +982,24 @@ fn sync_overlay_cursor_passthrough(
 }
 
 fn point_inside_card(app: &tauri::AppHandle, point: (i32, i32)) -> bool {
-    let bounds = app
-        .state::<AppState>()
-        .overlay_card_bounds
-        .lock()
-        .ok()
-        .and_then(|bounds| *bounds);
-    if let Some(bounds) = bounds {
-        point_in_window_bounds((bounds.x, bounds.y), (bounds.width, bounds.height), point)
-    } else {
-        point_inside_overlay(app, point)
-    }
-}
-
-fn point_inside_overlay(app: &tauri::AppHandle, point: (i32, i32)) -> bool {
     let Some(window) = app.get_webview_window("overlay") else {
         return false;
     };
-    let Ok(position) = window.outer_position() else {
+    let (Ok(position), Ok(size), Ok(scale)) = (
+        window.outer_position(),
+        window.inner_size(),
+        window.scale_factor(),
+    ) else {
         return false;
     };
-    let Ok(size) = window.inner_size() else {
-        return false;
-    };
-    point_in_window_bounds((position.x, position.y), (size.width, size.height), point)
+    let padding = (CARD_STAGE_PADDING * scale).round() as i32;
+    let width = (size.width as i32 - padding * 2).max(1) as u32;
+    let height = (size.height as i32 - padding * 2).max(1) as u32;
+    point_in_window_bounds(
+        (position.x + padding, position.y + padding),
+        (width, height),
+        point,
+    )
 }
 
 fn point_in_window_bounds(position: (i32, i32), size: (u32, u32), point: (i32, i32)) -> bool {

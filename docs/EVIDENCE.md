@@ -7,13 +7,13 @@
 | 项目 | 值 |
 | --- | --- |
 | 安装包 | `D:\DevTools\Rust\targets\eneye\release\bundle\nsis\Eneye_0.1.0_x64-setup.exe` |
-| 安装包大小 | 36.59 MiB |
-| 安装包 SHA256 | `04B7AE7562B84841BE227B2A8813887E218632A41FD8AAF24D4F70118448F725` |
+| 安装包大小 | 36.62 MiB |
+| 安装包 SHA256 | `35021D731599FAE04F4118F819A4CC67A19C403A784214AFF3DB911BE66CC47F` |
 | 安装位置 | `D:\Eneye` |
 | 已安装 exe | `D:\Eneye\eneye.exe` |
-| exe SHA256 | `93B094F1A66AB506E598E082106BCB19C7DA36F255FE659926F899417F79F12A` |
-| 构建时间 | 2026-11-07 09:50 左右 |
-| 运行进程 | pid 12796 |
+| exe SHA256 | `3B11B996C5E313B676BA5858637723F25C4BD8BB7CD9667400822A0C5680AE35` |
+| 构建时间 | 2026-11-07 10:03 左右 |
+| 运行进程 | pid 8640 |
 
 安装方式：NSIS 静默安装 `/S /D=D:\Eneye`，随后启动 `D:\Eneye\eneye.exe`。
 
@@ -51,27 +51,45 @@ less linear circular identification nanogenerator
 
 | 目标 | 光标坐标 | 结果 | 截图 |
 | --- | --- | --- | --- |
-| `on` | 475,201 | 卡片 headword `on`，OALD 介词义 | `F:\DSH\tmp\final-on.png` |
-| `war` | 415,201 | 卡片 headword `war`，OALD 名词义 | `F:\DSH\tmp\final-war.png` |
-| `being` | 220,169 | 卡片 headword `being`，OALD `be 原形` | `F:\DSH\tmp\final-being.png` |
-| `pollution` | 520,201 | 最终构建多次重试未取得，原因见 3.2 | 旧构建证据 `F:\DSH\tmp\native-pollution.png` |
+| `on` | 482,201 | 卡片 headword `on`，OALD 介词义 | `F:\DSH\tmp\v02-new-on.png` |
+| `war` | 430,201 | 卡片 headword `war`，OALD 名词义 | `F:\DSH\tmp\v02-new-war.png` |
+| `being` | 250,172 | 卡片 headword `being`，OALD `be 原形` | `F:\DSH\tmp\v02-new-being.png` |
+| `pollution` | 580,205 | 卡片 headword `pollution`，OALD 三个名词义 | `F:\DSH\tmp\v02-new-pollution.png` |
 
-对应的 overlay 窗口实测：
+对应的 overlay 窗口实测（显示器 96 DPI）：
 
-- `on`：hwnd 1377850，visible，rect `487,213,812,748`，光标 `475,201`，卡片在指针右下方。
-- `war`：同一 hwnd，rect `427,213,743,748`，光标 `415,201`。
-- `being`：同一 hwnd，rect `232,181,542,716`，光标 `220,169`。
+- `on`：rect `494,212,870,743`，size `376x531`，光标 `482,200`；
+- `war`：rect `442,213,818,744`，size `376x531`，光标 `430,201`；
+- `being`：rect `262,184,638,715`，size `376x531`，光标 `250,172`；
+- `pollution`：rect `592,217,968,750`，size `376x533`，光标 `580,205`。
 
 这组证据证明：
 
 - 安装版走的是精确 Edit 路径，而不是把整段文本交给 OCR；
-- `on`、`war`、`being` 没有前缀污染，也没有把 `war` 拆成 `wa/r`；
-- headword 在 360px 卡片内保持一行；
+- `pollution`、`on`、`war`、`being` 都没有前缀污染，也没有把 `war` 拆成 `wa/r`；
+- headword 在 360 CSS px 卡片内保持一行；
 - 卡片出现在指针附近，而不是屏幕左上角。
 
-### 3.2 `pollution` 的说明
+### 3.2 卡片尺寸/DPI 根因与多屏复测
 
-旧构建 `2368E4F2…` 在同一夹具上取得过 `pollution` 卡片（`F:\DSH\tmp\native-pollution.png`），headword 一行、OALD 三个名词义。最终构建 `93B094F1…` 上共重试四次：两次在 `520,201` 等待 2.3–4.5 秒没有出现卡片；一次在 `530,201` 被外部自动化把光标改到 `1324,638`；一次带光标稳定采样的重试在采样结束时光标已变为 `519,202`，overlay 仍不可见。因此没有把失败归因于应用，也没有伪造通过结果。识别路径、词典路径和 UI 在两次构建之间没有变化；该样例仍需在无外部输入干扰的环境复测。
+旧构建的卡片宽度在 310–325px 之间浮动，副屏曾出现 501x804。根因有两层：
+
+1. 前端把 `rect.width * devicePixelRatio` 当作窗口尺寸上报，而卡片本身是 flex 子项且默认可收缩；窗口变窄后卡片继续收缩，形成逐次缩小的棘轮。
+2. Rust 侧用 `PhysicalSize` 设置窗口，WebView 的 CSS 视口与物理尺寸在 150% DPI 下不一致。
+
+修复后的约定：
+
+- 前端只上报 **CSS 像素** 的宽高；x/y 仍为物理坐标；
+- 卡片 `flex: 0 0 auto; width: 100%`，不再随窗口收缩；
+- 窗口用 `LogicalSize`（360 + 2×8 gutter），高度按 CSS 高度 clamp 到 120–520；
+- 物理卡片尺寸、偏移和放置由 `scale_factor` 换算，透明 gutter 仍为 8 CSS px。
+
+实测：
+
+- 主屏 100%：窗口 `376x531`/`376x533`，内容卡片 360 CSS px；四个 headword 均一行；
+- 副屏 150%：窗口 `564x797`，正好是 376×1.5 与 531×1.5；光标 `-2035,397` 时卡片 rect `-2018,415,-1454,1212`，即卡片左上角约等于指针 +20 CSS px（物理 +30，含 gutter -12）。截图 `F:\DSH\tmp\v02-secondary-being.png`，headword `being` 一行。
+
+因此 O-05 的多屏/负坐标放置与 DPI 尺寸已完成装机验证，不再是 3.2 节旧版本所述的未闭环异常。
 
 ### 3.3 单实例
 
@@ -99,9 +117,8 @@ less linear circular identification nanogenerator
 ## 5. 仍未闭环的项
 
 1. **Win11 记事本证据缺失**：当前记事本可见 `Edit` 的文本长度为 0，UIA 只暴露整段 Pane Name。精确 Edit 路径已由 Win32 `Edit` 夹具覆盖，但“记事本里 pollution 任意字母”仍需要在记事本真实控件上复测。
-2. **Chrome `being` 未取得最终构建证据**：Chrome QA 页布局变化后，正确坐标约为 `237,367`；测试期间外部自动化把光标移到 `198,369`，卡片未出现。旧构建在 Chrome 上验证过 `pollution`，但 `being` 仍需干净环境复测。
-3. **副屏卡片尺寸/DPI 异常**：负坐标副屏上卡片已出现在指针旁，但 overlay 窗口实测 `501x804`，且 `GetDpiForWindow` 返回 144，而两台显示器与系统均为 96。主屏最终构建卡片宽度也出现 310–325px（高度约 535px），与预期的 376×536 不一致。该问题不影响 headword 正确性，但会影响视觉尺寸和多屏一致性，需要后续单独修复。
-4. **外部自动化干扰**：本机同时有另一个代理在移动窗口和光标，部分长等待测试不可复现；本文件只保留光标读回与窗口矩形同时自洽的样例。
+2. **Chrome `being` 未取得最终构建证据**：Chrome QA 页布局变化后，正确坐标约为 `237,367`；测试期间外部自动化把光标移到 `198,369`，卡片未出现。旧构建在 Chrome 上验证过 `pollution`，但 `being` 仍需干净环境复测。原生 Edit 夹具上的 `being` 已通过。
+3. **外部自动化干扰**：本机同时有另一个代理在移动窗口和光标，部分长等待测试不可复现；本文件只保留光标读回与窗口矩形同时自洽的样例。
 
 ## 6. 复现命令
 

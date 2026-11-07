@@ -98,8 +98,8 @@ export function OverlayWindow({ settings }: OverlayWindowProps) {
         bounds: {
           x: Math.round(position.x + rect.left * scale),
           y: Math.round(position.y + rect.top * scale),
-          width: Math.max(1, Math.round(rect.width * scale)),
-          height: Math.max(1, Math.round(rect.height * scale)),
+          width: Math.max(1, Math.round(rect.width)),
+          height: Math.max(1, Math.round(rect.height)),
         },
       });
     }

@@ -1352,9 +1352,10 @@ select {
   display: flex;
   flex-direction: column;
   max-height: 520px;
+  flex: 0 0 auto;
   overflow: hidden;
   position: relative;
-  width: 360px;
+  width: 100%;
 }
 
 .card-header {
@@ -1743,9 +1744,10 @@ select {
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   max-height: 520px;
   overflow: hidden;
-  width: 360px;
+  width: 100%;
 }
 
 .translation-card-header {

@@ -59,11 +59,11 @@
 
 | ID | 场景 | 期望 | 当前状态 | 证据 / 根因 | 目标 Phase |
 | --- | --- | --- | --- | --- | --- |
-| O-01 | 距离 0–240 | 实测误差 ≤4px | partial | 双轴 0–240 已实现，place_card 单测 20/240 精确；待装机实测 150%/200% | 4 |
+| O-01 | 距离 0–240 | 实测误差 ≤4px | partial | 双轴 0–240 已实现；主屏 100% 默认 20 CSS px 实测 rect=指针+20+8 gutter，副屏 150% 默认 20 CSS px 实测物理 +30（20×1.5）；0/240 端点仍待装机拖动滑块实测 | 4 |
 | O-02 | 右侧默认 | 距离等于设置 | verified | 窗口=卡片+8px gutter，卡片不再有 112px 左缩进；单测 1000,300+20 -> 1020,320 | 4 |
 | O-03 | 左/上翻转 | 同逻辑距离 | verified | 按真实卡片尺寸翻转；单测右边界 1800 -> 1460、下边界 900 -> 480 | 4 |
 | O-04 | 右/下边缘 clamp | 不遮词、不越界 | verified | 统一 12px 屏边 clamp；单测角点 5,5 -> 25,25 | 4 |
-| O-05 | 多屏/负坐标 | 正确 monitor/scale | partial | 改用 Win32 工作区后，负坐标装机实测卡片在指针旁（cursor -1880,402，窗口 -1872,410）；测试夹具被外部移动、卡片 DPI 显示 144 而屏幕为 96，待干净环境复测 | 4 |
+| O-05 | 多屏/负坐标 | 正确 monitor/scale | verified | Win32 工作区 + 逻辑窗口尺寸；副屏 150% 实测 cursor -2035,397，overlay rect -2018,415,-1454,1212，size 564x797（376/531×1.5），卡片紧贴指针，headword being 正确（`F:\DSH\tmp\v02-secondary-being.png`） | 4 |
 | O-06 | 滑块实时移动 | 不重新悬停 | partial | worker 20ms 轮询双轴 offset 并用新卡片尺寸重排；待装机实测 | 4 |
 | O-07 | 设置页预览 | 实时反映距离 | verified | 预览读取双轴 CSS 变量（0.35 比例）；SettingsWindow 测试覆盖 120/80 | 4 |
 | O-08 | 透明 gutter 点击 | 不挡下层、不算卡片内 | partial | 卡片 bounds 与 8px gutter 分离，worker 切换 ignore_cursor_events；待物理点击验证 | 4 |
