@@ -898,10 +898,14 @@ select {
   font-size: 12px;
 }
 
-.agent-role-row select {
+.agent-role-row select,
+.agent-role-row input {
   min-width: 0;
-  padding-right: 26px;
   width: 100%;
+}
+
+.agent-role-row select {
+  padding-right: 26px;
 }
 
 .agent-rule-note {

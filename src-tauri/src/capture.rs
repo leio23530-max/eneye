@@ -313,6 +313,13 @@ fn run_capture_worker(app: tauri::AppHandle, receiver: mpsc::Receiver<MouseInput
                         leave_since = None;
                     }
                     down_on_overlay = false;
+                    if app
+                        .state::<AppState>()
+                        .overlay_drag_pending
+                        .swap(false, Ordering::AcqRel)
+                    {
+                        remember_dragged_anchor(&app);
+                    }
                     stability_anchor = pointer;
                     stable_since = Instant::now();
                 }
@@ -679,6 +686,26 @@ fn anchor_from_card_top_left(bounds: OverlayBounds, offset: (i32, i32)) -> (i32,
     (bounds.x - offset.0, bounds.y - offset.1)
 }
 
+fn remember_dragged_anchor(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("overlay") else {
+        return;
+    };
+    let (Ok(position), Ok(scale)) = (window.outer_position(), window.scale_factor()) else {
+        return;
+    };
+    let padding = (CARD_STAGE_PADDING * scale).round() as i32;
+    let card = OverlayBounds {
+        x: position.x + padding,
+        y: position.y + padding,
+        width: 1,
+        height: 1,
+    };
+    let anchor = anchor_from_card_top_left(card, overlay_offset(app));
+    if let Ok(mut current) = app.state::<AppState>().overlay_anchor.lock() {
+        *current = Some(anchor);
+    }
+}
+
 fn overlay_offset(app: &tauri::AppHandle) -> (i32, i32) {
     app.state::<AppState>()
         .settings
@@ -897,7 +924,11 @@ fn monitor_scale(_point: (i32, i32)) -> Option<f64> {
     None
 }
 
-fn physical_metrics(scale: f64, card_height: u32, offset: (i32, i32)) -> (i32, (u32, u32), (i32, i32)) {
+fn physical_metrics(
+    scale: f64,
+    card_height: u32,
+    offset: (i32, i32),
+) -> (i32, (u32, u32), (i32, i32)) {
     let padding = (CARD_STAGE_PADDING * scale).round() as i32;
     let card = (
         (DEFAULT_CARD_WIDTH * scale).round() as u32,
@@ -2231,9 +2262,18 @@ mod tests {
 
     #[test]
     fn scales_card_and_offset_for_the_target_monitor() {
-        assert_eq!(physical_metrics(1.0, 520, (20, 20)), (8, (360, 520), (20, 20)));
-        assert_eq!(physical_metrics(1.5, 520, (20, 20)), (12, (540, 780), (30, 30)));
-        assert_eq!(physical_metrics(2.0, 520, (240, 120)), (16, (720, 1040), (480, 240)));
+        assert_eq!(
+            physical_metrics(1.0, 520, (20, 20)),
+            (8, (360, 520), (20, 20))
+        );
+        assert_eq!(
+            physical_metrics(1.5, 520, (20, 20)),
+            (12, (540, 780), (30, 30))
+        );
+        assert_eq!(
+            physical_metrics(2.0, 520, (240, 120)),
+            (16, (720, 1040), (480, 240))
+        );
     }
 
     #[test]

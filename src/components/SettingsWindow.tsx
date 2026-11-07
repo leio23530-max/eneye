@@ -1126,20 +1126,20 @@ export function SettingsWindow({
                 return (
                   <div className="agent-role-row" key={role}>
                     <strong>{roleLabels[role]}</strong>
-                    <select
+                    <input
                       aria-label={`${roleLabels[role]}模型`}
+                      list={`model-options-${role}`}
                       onChange={(event) =>
                         updateRole(role, { model: event.target.value })
                       }
+                      placeholder="选择或输入模型"
                       value={settings.aiRoles[role].model}
-                    >
-                      <option value="">选择模型</option>
+                    />
+                    <datalist id={`model-options-${role}`}>
                       {roleModelOptions.map((model) => (
-                        <option key={model} value={model}>
-                          {model}
-                        </option>
+                        <option key={model} value={model} />
                       ))}
-                    </select>
+                    </datalist>
                     <select
                       aria-label={`${roleLabels[role]}推理强度`}
                       onChange={(event) =>

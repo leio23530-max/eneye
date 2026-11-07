@@ -11,8 +11,8 @@
 | C-02 | 记事本 `A)As being` | `being` 或 `As` | verified | 记事本 being 五个字母 5/5 显示 being（OALD be 原形）；截图 p0-full-being-5..9.png | 1 |
 | C-03 | 记事本 `war on pollution` | 不拆成 `wa/r`、`0/n` | verified | 记事本 war 3/3、on 2/2，均未拆词；blank/marker 不出卡 | 1 |
 | C-04 | 记事本空白、题号、下划线 | 不出卡 | verified | 记事本 blank-4 与 marker-1 均无卡片；截图 F:\DSH\tmp\p0-full-blank-4.png、p0-full-marker-1.png | 1 |
-| C-05 | 独立 `poll`、`on` | 正常显示 | partial | 真实 Win32 Edit 的独立 `on` 已显示 OALD 介词义；独立 `poll` 仍只有词典查询，无真实窗口证据 | 1 |
-| C-06 | Chrome/Edge 普通网页 | 正确 headword | verified | 最终安装版 Chrome QA：pollution/being/war/on 四点全部正确，being 无前缀污染；截图 p0-chrome-*.png | 1 |
+| C-05 | 独立 `poll`、`on` | 正常显示 | verified | 最终安装版记事本 `poll on`：poll 344,241 -> OALD poll 名词/动词，on 380,241 -> OALD 介词；截图 p0-poll-poll.png、p0-poll-on.png | 1 |
+| C-06 | Chrome/Edge 普通网页 | 正确 headword | verified | 最终安装版 Chrome 204,288/330,377/465,456/543,456 与 Edge 204,280/330,363/465,432/543,432 全部正确；截图 p0-chrome-*.png、p0-edge-current-*.png | 1 |
 | C-07 | PDF 文本层 / 扫描 PDF | 正确 headword / 不伪造 | open | 无真实 fixture 与 DPI 矩阵 | 1 |
 | C-08 | Calibre / Office / WordPad | 正确 headword | open | 无真实窗口证据 | 1 |
 | C-09 | 100% / 150% / 200% DPI | 词框和点击一致 | partial | 100% 与 150% 实测；200% 仅由 physical_metrics 单测覆盖 | 1 / 4 |
@@ -44,7 +44,7 @@
 | --- | --- | --- | --- | --- | --- |
 | A-01 | 无 Key / 无模型 | UI 明确“未配置” | verified | 设置页明确提示未选择翻译模型；命令返回可操作中文错误 | - |
 | A-02 | 测试连接 + 模型列表 | 明确成功/失败 | verified | 设置页保存 URL/key 后测试连接成功，读取 6 个 mock 模型；截图 settings-api3.png | 3 |
-| A-03 | `/models` 不可用 | 可手输模型 | partial | mock /models 可用；无 /models 时手输模型的 UI 未单独 E2E | 3 |
+| A-03 | `/models` 不可用 | 可手输模型 | verified | 模型行改为可输入 combobox（datalist），`SettingsWindow.test.tsx` 覆盖手输 `deepseek-chat`；/models 全失败网络路径未单独 E2E | 3 |
 | A-04 | 拖选 → 流式翻译 | 逐字增长、完成 | verified | 真实拖选 + mock 流式：正在翻译、缓慢 m、停止翻译；截图 ai-drag-2.png | 3 |
 | A-05 | 取消 | 正常终态，无错误/重试 | verified | cancelled 中性终态、保留已生成内容、无 alert；reducer/UI 测试 | - |
 | A-06 | 旧请求覆盖新卡 | 丢弃旧事件 | verified | 单测 + 真实拖选 line2 后改选 line1，旧流未覆盖新卡；截图 final-stale.png | - |
@@ -53,7 +53,7 @@
 | A-09 | 超时/断流/空响应 | 可恢复 | verified | 202/204、不完整流、空内容、JSON completion、超时/连接失败均有中文提示与测试；取消保留已生成内容 | 3 |
 | A-10 | 翻译 vs 解释 | 不同 prompt/命令 | verified | TranslationKind 区分 prompt；解释不写历史；前端标题/动作独立 | - |
 | A-11 | Key 安全 | 只进 Credential Manager | verified | keyring + redact_secret 测试 | - |
-| A-12 | 历史记录 | 成功才写，取消/失败不写 | partial | 成功翻译写入 history；解释 nanogenerator 记录数 0；取消未产生完成记录；401/429/500 未逐条核对历史 | 3 |
+| A-12 | 历史记录 | 成功才写，取消/失败不写 | partial | 成功翻译写入 history；解释 nanogenerator 记录数 0；取消未产生完成记录；401/429/500 仍未逐条核对历史 | 3 |
 
 ## 4. 悬浮窗
 
@@ -66,8 +66,8 @@
 | O-05 | 多屏/负坐标 | 正确 monitor/scale | verified | 最终版副屏 150% 实测 target -1806,423，卡片左上 -1776,454，物理 +30/+30，窗口 564x804；截图 p0-multi.png | 4 |
 | O-06 | 滑块实时移动 | 不重新悬停 | verified | 滑块 RangeValue.SetValue 后已开卡片即时移动，0..240 LIVE 全部 dx=dy=0 | 4 |
 | O-07 | 设置页预览 | 实时反映距离 | verified | 预览读取双轴 CSS 变量（0.35 比例）；SettingsWindow 测试覆盖 120/80 | 4 |
-| O-08 | 透明 gutter 点击 | 不挡下层、不算卡片内 | partial | 8px gutter 与卡片 bounds 分离、ignore_cursor_events 已实现；未做最终物理点击复测 | 4 |
-| O-09 | 卡片拖动后设置保存 | 不跳回词锚点 | partial | 拖动后按新位置重算 anchor；未做最终装机拖拽复测 | 4 |
+| O-08 | 透明 gutter 点击 | 不挡下层、不算卡片内 | verified | 最终安装版：卡片边缘 578,215，点击 gutter 574,255，记事本 caret 110,110 -> 102,102，新卡出现在 pointer+20；日志 p0-gutter-current2.txt | 4 |
+| O-09 | 卡片拖动后设置保存 | 不跳回词锚点 | verified | 最终安装版：拖动 +200,+100 后边缘 778,315；偏移 40/40 后边缘 798,335，等于 dragged+20，不是旧锚点 598,235；日志 p0-offset-trial.txt | 4 |
 
 ## 5. 诊断与交付
 
@@ -76,8 +76,8 @@
 | G-01 | 每层耗时/失败原因 | UIA/MSAA/Win32/OCR 全展示 | partial | 诊断页已展示四层 stages、候选排序、判断依据与纠正入口；OCR crop 图与真实装机交互仍待补 | 5 |
 | G-02 | 用户纠正 | 本地保存正确词 | verified | 诊断页“这次识别错了”写入 recognition-corrections.jsonl；抽出 append_recognition_correction 并加 JSONL/空值测试 | 5 |
 | G-03 | 真实鼠标证据库 | 每个失败样例有 fixture | verified | docs/EVIDENCE.md 汇总构建哈希、夹具坐标、截图路径、单实例和已知限制；夹具脚本见 F:\DSH\tmp\eneye-final-edit.ps1 | 0–5 |
-| G-04 | 安装版验收 | D:\Eneye 实际运行 | verified | 最终 NSIS 安装到 D:\Eneye；eneye.exe SHA256 0883332A…；P0 记事本/Chrome/偏移/翻转/多屏/取消均在最终版实测 | 5 |
-| G-05 | 全量门禁 | verify/test/clippy/fmt/build | verified | 最终门禁 118 Rust（1 ignored）+ 44 frontend；clippy -D warnings、fmt、Vite、NSIS 均通过 | 每 Phase 重跑 |
+| G-04 | 安装版验收 | D:\Eneye 实际运行 | verified | 最终 NSIS 安装到 D:\Eneye；eneye.exe SHA256 E34DF8B7…；最终版复测 poll、Chrome/Edge、偏移、翻转、gutter、拖动 | 5 |
+| G-05 | 全量门禁 | verify/test/clippy/fmt/build | verified | 最终门禁 118 Rust（1 ignored）+ 45 frontend；clippy -D warnings、fmt、Vite、NSIS 均通过 | 每 Phase 重跑 |
 
 ## 6. 测试矩阵
 

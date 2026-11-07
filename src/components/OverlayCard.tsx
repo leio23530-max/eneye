@@ -197,7 +197,7 @@ export function OverlayCard({
     }
     void invoke("begin_overlay_drag")
       .then(() => getCurrentWindow().startDragging())
-      .finally(() => invoke("end_overlay_drag"));
+      .catch(() => invoke("end_overlay_drag"));
   }
 
   const cardStyle = {

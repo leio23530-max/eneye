@@ -226,4 +226,14 @@ describe("SettingsWindow", () => {
     expect(screen.getByLabelText("翻译模型")).toBeVisible();
     expect(screen.getByLabelText("图片模型")).toBeVisible();
   });
+
+  it("allows a manually entered model when the model list is unavailable", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.click(screen.getByRole("button", { name: "AI 翻译" }));
+    const model = screen.getByLabelText("翻译模型");
+    await user.clear(model);
+    await user.type(model, "deepseek-chat");
+    expect(model).toHaveValue("deepseek-chat");
+  });
 });
