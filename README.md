@@ -4,6 +4,12 @@ Eneye 是一个 Windows 跨应用划词翻译器。它读取当前屏幕中可�
 
 ![悬浮译文卡片](docs/images/overlay-translation.png)
 
+## 安装
+
+直接下载安装包：[最新 Release](https://github.com/leio23530-max/eneye/releases/latest)（当前用户安装，无需管理员权限）。
+
+安装包未做代码签名，Windows 可能弹出 SmartScreen 提示：点「更多信息」→「仍要运行」。启动后按 `Ctrl+Alt+E` 打开设置，在「AI 翻译」里填 API 地址、模型和 API Key 即可使用。
+
 ## 当前功能
 
 - 鼠标稳定悬停约 240ms 自动查询英文单词，延迟可在 100–500ms 间调整。
