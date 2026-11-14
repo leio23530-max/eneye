@@ -189,9 +189,10 @@ def main() -> int:
         default=Path(
             os.environ.get(
                 "ENEYE_ECDICT_CSV",
-                r"D:\DevTools\data\eneye\ecdict.csv",
+                str(Path(__file__).resolve().parents[1] / "data" / "ecdict.csv"),
             )
         ),
+        help="ECDICT CSV 路径；缺省会下载到仓库内 data/ecdict.csv",
     )
     parser.add_argument(
         "--output",

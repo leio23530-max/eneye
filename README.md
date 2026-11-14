@@ -2,6 +2,8 @@
 
 Eneye 是一个 Windows 跨应用划词翻译器。它读取当前屏幕中可见的文字，因此可用于浏览器、PDF 阅读器、Office、记事本和图片查看器，而不依赖特定文件格式。
 
+![悬浮译文卡片](docs/images/overlay-translation.png)
+
 ## 当前功能
 
 - 鼠标稳定悬停约 240ms 自动查询英文单词，延迟可在 100–500ms 间调整。
@@ -29,16 +31,6 @@ Eneye 是一个 Windows 跨应用划词翻译器。它读取当前屏幕中可�
 - Visual Studio C++ Build Tools 与 Windows SDK
 - Python 3.10+，仅用于生成词典数据库
 
-当前机器的工具链安装位置：
-
-```text
-D:\DevTools\Rust\cargo
-D:\DevTools\Rust\rustup
-D:\DevTools\Rust\targets\eneye
-D:\DevTools\npm-cache
-D:\DevTools\data\eneye\ecdict.csv
-```
-
 ## 开发
 
 ```powershell
@@ -63,7 +55,7 @@ cargo fmt --all -- --check
 npm run tauri build
 ```
 
-NSIS 安装包使用当前用户安装模式，无需管理员权限。ECDICT SQLite 是构建资源，不提交到 Git；脚本会从固定的上游提交校验并生成它。
+NSIS 安装包使用当前用户安装模式，无需管理员权限。ECDICT SQLite 是构建资源，不提交到 Git；脚本会从固定的上游提交校验并生成它。缺少 CSV 时会自动下载到 `data/ecdict.csv`，也可以 `--csv` 或环境变量 `ENEYE_ECDICT_CSV` 指定已有文件。
 
 ## OCR 可选功能
 
@@ -82,3 +74,7 @@ NSIS 安装包使用当前用户安装模式，无需管理员权限。ECDICT SQ
 - DRM 黑屏区域、管理员权限窗口中未授权的内容无法读取。
 - 不支持旧版 MDX v1.2、Salsa20 加密头及部分 Compact 样式词典。
 - 个人 MVP 安装包未进行代码签名，Windows 可能显示 SmartScreen 提示。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。内置词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT），其余第三方组件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -9,3 +9,5 @@ src-tauri/gen/
 artifacts/
 src-tauri/resources/ecdic.sqlite
 src-tauri/resources/ecdic.sqlite-*
+.cargo/
+data/
