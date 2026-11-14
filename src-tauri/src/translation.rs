@@ -12,6 +12,9 @@ use crate::settings::AppSettings;
 const KEYRING_SERVICE: &str = "app.eneye.desktop.ai";
 const KEYRING_USER: &str = "default";
 const MAX_SELECTION_CHARS: usize = 2_000;
+/// 流式翻译的整体超时预算。推理型模型排队时首字延迟实测可达十余秒，
+/// 30 秒容易把正常请求误判成超时，因此放宽到 60 秒。
+const TRANSLATION_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,7 +239,7 @@ where
     });
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(TRANSLATION_TIMEOUT_SECS))
         .build()?;
     let protocol = AiProtocol::for_settings(settings);
     let endpoint = translation_endpoint(&settings.ai_base_url, protocol)?;
@@ -424,7 +427,7 @@ where
 
 fn transport_error(error: &reqwest::Error) -> String {
     if error.is_timeout() {
-        "AI 服务响应超时（30 秒），请稍后重试".to_owned()
+        format!("AI 服务响应超时（{TRANSLATION_TIMEOUT_SECS} 秒），请稍后重试")
     } else if error.is_connect() {
         "无法连接 AI 服务，请检查网络与 Base URL".to_owned()
     } else {

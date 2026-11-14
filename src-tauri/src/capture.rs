@@ -169,7 +169,9 @@ pub fn translate_focused_selection(app: tauri::AppHandle) {
                     return;
                 };
                 let point = current_cursor_position();
-                show_translation_for_text(&app, text, "uia", point);
+                // 快捷键是用户显式操作，只受「启用 AI 翻译」总开关约束，
+                // 不应被「自动翻译选区」影响。
+                show_translation_for_text(&app, text, "uia", point, TranslationTrigger::Hotkey);
             }
         })
         .ok();
@@ -1173,11 +1175,11 @@ fn handle_selection(
         return;
     }
     if let Some(text) = uia_selection(automation, start) {
-        show_translation_for_text(app, text, "uia", end);
+        show_translation_for_text(app, text, "uia", end, TranslationTrigger::DragSelect);
     } else if let Some(text) = copy_selection_text() {
-        show_translation_for_text(app, text, "clipboard", end);
+        show_translation_for_text(app, text, "clipboard", end, TranslationTrigger::DragSelect);
     } else if let Some(text) = ocr_selection(start, end) {
-        show_translation_for_text(app, text, "ocr", end);
+        show_translation_for_text(app, text, "ocr", end, TranslationTrigger::DragSelect);
     }
 }
 
@@ -1243,11 +1245,33 @@ fn uia_selection_focused(automation: &uiautomation::UIAutomation) -> Option<Stri
     None
 }
 
+/// 选区翻译的触发来源。两种来源的门禁条件不同：
+/// - DragSelect：鼠标拖选后自动弹出译文，额外受「自动翻译选区」约束；
+/// - Hotkey：用户按 Ctrl+Alt+T 的显式请求，只受「启用 AI 翻译」总开关约束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranslationTrigger {
+    DragSelect,
+    Hotkey,
+}
+
+/// 判断本次选区翻译是否放行。入参为两个开关的当前值与触发来源。
+fn translation_allowed(
+    master_enabled: bool,
+    auto_translate: bool,
+    trigger: TranslationTrigger,
+) -> bool {
+    match trigger {
+        TranslationTrigger::Hotkey => master_enabled,
+        TranslationTrigger::DragSelect => master_enabled && auto_translate,
+    }
+}
+
 fn show_translation_for_text(
     app: &tauri::AppHandle,
     text: String,
     source: &str,
     point: (i32, i32),
+    trigger: TranslationTrigger,
 ) {
     if !is_usable_selection(&text) {
         return;
@@ -1258,7 +1282,11 @@ fn show_translation_for_text(
         .lock()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    if !settings.ai_translation_enabled || !settings.auto_translate {
+    if !translation_allowed(
+        settings.ai_translation_enabled,
+        settings.auto_translate,
+        trigger,
+    ) {
         return;
     }
     hide_overlay(app);
@@ -2047,6 +2075,34 @@ fn run_mouse_hook() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotkey_translation_ignores_the_auto_translate_toggle() {
+        assert!(translation_allowed(true, false, TranslationTrigger::Hotkey));
+        assert!(translation_allowed(true, true, TranslationTrigger::Hotkey));
+    }
+
+    #[test]
+    fn drag_translation_still_requires_auto_translate() {
+        assert!(!translation_allowed(
+            true,
+            false,
+            TranslationTrigger::DragSelect
+        ));
+        assert!(translation_allowed(
+            true,
+            true,
+            TranslationTrigger::DragSelect
+        ));
+    }
+
+    #[test]
+    fn master_switch_disables_every_translation_trigger() {
+        for trigger in [TranslationTrigger::Hotkey, TranslationTrigger::DragSelect] {
+            assert!(!translation_allowed(false, true, trigger));
+            assert!(!translation_allowed(false, false, trigger));
+        }
+    }
 
     fn ocr_candidate(text: &str, confidence: f64, dictionary_hit: bool) -> RecognitionCandidate {
         RecognitionCandidate {

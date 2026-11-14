@@ -819,7 +819,8 @@ export function SettingsWindow({
                 <span>
                   <span className="field-label">自动翻译选区</span>
                   <span className="field-help">
-                    至少两个拉丁词或四个 CJK 字符
+                    至少两个拉丁词或四个 CJK 字符；关闭后仍可按 Ctrl+Alt+T
+                    手动翻译
                   </span>
                 </span>
                 <Toggle
